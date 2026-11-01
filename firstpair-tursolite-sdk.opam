@@ -1,0 +1,17 @@
+opam-version: "2.0"
+name: "firstpair-tursolite-sdk"
+version: "0.1.0"
+synopsis: "The Turso C ABI for OCaml, built from the pinned Rust crate"
+maintainer: "Alexy Khrabrov"
+authors: ["Alexy Khrabrov"]
+license: "Apache-2.0"
+homepage: "https://github.com/querygraph/tursolite"
+bug-reports: "https://github.com/querygraph/tursolite/issues"
+dev-repo: "git+https://github.com/querygraph/tursolite.git"
+depends: [
+  "ocaml" {>= "5.1"}
+  "dune" {>= "3.9"}
+]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+]

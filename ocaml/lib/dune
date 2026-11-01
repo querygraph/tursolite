@@ -1,0 +1,11 @@
+(library
+ (name tursolite)
+ (public_name firstpair-tursolite)
+ (libraries
+  sqlite3
+  unix
+  (select
+   turso_backend.ml
+   from
+   (firstpair-tursolite-sdk -> turso_backend.sdk.ml)
+   (-> turso_backend.none.ml))))

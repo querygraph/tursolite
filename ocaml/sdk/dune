@@ -1,0 +1,28 @@
+; The Turso C ABI: libturso_sdk_kit from the crate pinned in ../../Cargo.lock.
+(rule
+ (targets libturso_sdk_kit.a dllturso_sdk_kit.so)
+ (deps
+  build-sdk.sh
+  ../../Cargo.toml
+  ../../Cargo.lock
+  ../../rust-toolchain.toml
+  (source_tree ../../sdk)
+  (source_tree ../../src))
+ (action
+  (run sh build-sdk.sh)))
+
+(library
+ (name tursolite_sdk)
+ (public_name firstpair-tursolite-sdk)
+ (foreign_stubs
+  (language c)
+  (names tursolite_stubs))
+ (foreign_archives turso_sdk_kit)
+ (c_library_flags
+  (:include link-flags.sexp)))
+
+(rule
+ (with-stdout-to
+  link-flags.sexp
+  (system
+   "if [ \"$(uname)\" = Darwin ]; then echo '(-framework CoreFoundation -framework Security -liconv)'; else echo '(-lpthread -ldl -lm)'; fi")))

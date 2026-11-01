@@ -1,0 +1,21 @@
+[package]
+name = "firstpair-tursolite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "One embedded SQL interface over SQLite and Turso, with MVCC where Turso offers it"
+license = "Apache-2.0"
+repository = "https://github.com/querygraph/tursolite"
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+turso = ["dep:turso", "dep:pollster"]
+
+[dependencies]
+rusqlite = { version = "0.41.0", features = ["bundled"], optional = true }
+turso = { version = "=0.8.3", default-features = false, optional = true }
+pollster = { version = "0.4", optional = true }
+
+[workspace]
+members = [".", "sdk"]

@@ -1,0 +1,23 @@
+opam-version: "2.0"
+name: "firstpair-tursolite"
+version: "0.1.0"
+synopsis: "One embedded SQL interface over SQLite and Turso"
+description: """
+SQLite through the sqlite3 package, and Turso with MVCC when
+firstpair-tursolite-sdk is installed. Builds with stock OCaml 5 and with OxCaml.
+"""
+maintainer: "Alexy Khrabrov"
+authors: ["Alexy Khrabrov"]
+license: "Apache-2.0"
+homepage: "https://github.com/querygraph/tursolite"
+bug-reports: "https://github.com/querygraph/tursolite/issues"
+dev-repo: "git+https://github.com/querygraph/tursolite.git"
+depends: [
+  "ocaml" {>= "5.1"}
+  "dune" {>= "3.9"}
+  "sqlite3" {>= "5.0"}
+]
+depopts: ["firstpair-tursolite-sdk"]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+]
