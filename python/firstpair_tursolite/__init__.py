@@ -30,8 +30,8 @@ import warnings
 from typing import Any, Callable, Iterator, Optional, Sequence, TypeVar, Union
 
 __all__ = [
-    "Connection", "Database", "Engine", "Error", "ErrorKind", "Header", "Journal",
-    "Options", "Seal", "Value", "TURSO_VERSION", "inspect", "resolve", "turso_version",
+    "Connection", "Database", "Engine", "Error", "ErrorKind", "Experimental", "Header", "Journal",
+    "Options", "Rows", "Seal", "Value", "TURSO_VERSION", "inspect", "resolve", "turso_version",
 ]
 
 __version__ = "0.2.0"
@@ -52,7 +52,7 @@ class Engine(enum.Enum):
         try:
             return cls(name)
         except ValueError:
-            raise Error(f"unknown engine {name}") from None
+            raise Error(ErrorKind.OTHER, f"unknown engine {name}") from None
 
     @property
     def available(self) -> bool:
@@ -68,13 +68,23 @@ class Journal(enum.Enum):
     EXISTING = "existing"
 
 
+class Experimental(enum.Enum):
+    """One of Turso's experimental features, off unless asked for. Turso
+    only: asking for one with the SQLite engine is refused."""
+
+    #: `CREATE TABLE .. WITHOUT ROWID`. Turso 0.8.3 writes such tables in WAL
+    #: mode only (not MVCC), and refuses secondary indexes on them; a sealed
+    #: file is a standard one SQLite reads.
+    WITHOUT_ROWID = "without_rowid"
+
+
 class Seal(enum.Enum):
     """What closing leaves of a file Turso wrote."""
 
     #: A rollback journal, as SQLite made it.
     STANDARD = "standard"
     #: A WAL file, which Turso reopens as it was.
-    WAL = "wal"
+    KEEP_WAL = "keep_wal"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,6 +102,8 @@ class Options:
     create: bool = True
     busy_ms: int = 60000
     seal: Seal = Seal.STANDARD
+    #: Turso's experimental features; none by default, refused for SQLite.
+    experimental: tuple[Experimental, ...] = ()
 
 
 class ErrorKind(enum.Enum):
@@ -109,10 +121,12 @@ class ErrorKind(enum.Enum):
 
 
 class Error(Exception):
-    def __init__(self, message: str, kind: ErrorKind = ErrorKind.OTHER):
+    """Every failure of this package."""
+
+    def __init__(self, kind: ErrorKind, message: str):
         super().__init__(message)
-        self.message = message
         self.kind = kind
+        self.message = message
 
     @property
     def conflict(self) -> bool:
@@ -121,7 +135,7 @@ class Error(Exception):
 
 
 def _refused(path: str, message: str) -> Error:
-    return Error(f"{path}: {message}", ErrorKind.REFUSED)
+    return Error(ErrorKind.REFUSED, f"{path}: {message}")
 
 
 _turso_module: Any = None
@@ -153,8 +167,8 @@ def turso_version() -> str:
         try:
             found = importlib.metadata.version("pyturso")
         except importlib.metadata.PackageNotFoundError:
-            raise Error("Turso is not installed: pip install 'firstpair-tursolite[turso]'") from None
-        raise Error(f"Turso needs pyturso=={TURSO_VERSION}, found {found}")
+            raise Error(ErrorKind.REFUSED, "Turso is not installed: pip install 'firstpair-tursolite[turso]'") from None
+        raise Error(ErrorKind.REFUSED, f"Turso needs pyturso=={TURSO_VERSION}, found {found}")
     return TURSO_VERSION
 
 
@@ -181,11 +195,11 @@ def inspect(path: Union[str, os.PathLike]) -> Optional[Header]:
     except FileNotFoundError:
         return None
     except OSError as e:
-        raise Error(f"{path}: {e}") from e
+        raise Error(ErrorKind.OTHER, f"{path}: {e}") from e
     if not b:
         return None
     if len(b) < 100 or b[:16] != b"SQLite format 3\0":
-        raise Error(f"{path}: not a database", ErrorKind.NOT_A_DATABASE)
+        raise Error(ErrorKind.NOT_A_DATABASE, f"{path}: not a database")
     raw = int.from_bytes(b[16:18], "big")
     return Header(
         page_size=65536 if raw == 1 else raw,
@@ -230,7 +244,7 @@ def _sqlite_error(e: Exception) -> Error:
             26: ErrorKind.NOT_A_DATABASE, 8: ErrorKind.READ_ONLY}.get(primary, ErrorKind.OTHER)
     if primary is None and isinstance(e, sqlite3.IntegrityError):
         kind = ErrorKind.CONSTRAINT
-    return Error(str(e), kind)
+    return Error(kind, str(e))
 
 
 def _turso_error(e: Exception) -> Error:
@@ -247,7 +261,7 @@ def _turso_error(e: Exception) -> Error:
         kind = ErrorKind.READ_ONLY
     else:
         kind = ErrorKind.OTHER
-    return Error(m, kind)
+    return Error(kind, m)
 
 
 def _uri(path: str, **query: str) -> str:
@@ -258,6 +272,21 @@ def _param(v: Any) -> Any:
     if isinstance(v, (bytearray, memoryview)):
         return bytes(v)
     return v
+
+
+@dataclasses.dataclass(frozen=True)
+class Rows:
+    """The rows of a query with their column names."""
+
+    columns: tuple[str, ...]
+    rows: list[tuple]
+
+    def column(self, name: str) -> int:
+        """The index of the column named `name`."""
+        try:
+            return self.columns.index(name)
+        except ValueError:
+            raise Error(ErrorKind.OTHER, f"no column {name}") from None
 
 
 class Connection:
@@ -278,7 +307,7 @@ class Connection:
     def _execute(self, sql: str, params: Sequence[Any]) -> Any:
         """A cursor positioned before the first row."""
         if self.closed:
-            raise Error("connection is closed")
+            raise Error(ErrorKind.OTHER, "connection is closed")
         args = tuple(_param(p) for p in params)
         if not self._turso:
             try:
@@ -303,10 +332,16 @@ class Connection:
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[tuple]:
         """Runs one statement and returns its rows."""
+        return self.query_rows(sql, params).rows
+
+    def query_rows(self, sql: str, params: Sequence[Any] = ()) -> Rows:
+        """Runs one statement and returns its rows with the column names."""
         with self._lock:
             cur = self._execute(sql, params)
             try:
-                return [tuple(r) for r in cur.fetchall()]
+                rows = [tuple(r) for r in cur.fetchall()]
+                columns = tuple(d[0] for d in cur.description or ())
+                return Rows(columns, rows)
             except Exception as e:
                 raise self._error(e) from e
             finally:
@@ -343,7 +378,7 @@ class Connection:
         """The one value of a one-row, one-column result."""
         rows = self.query(sql, params)
         if len(rows) != 1 or len(rows[0]) != 1:
-            raise Error(f"expected one value from {sql!r}, got {len(rows)} rows")
+            raise Error(ErrorKind.OTHER, f"expected one value from {sql!r}, got {len(rows)} rows")
         return rows[0][0]
 
     def run(self, sql: str, params: Sequence[Any] = ()) -> None:
@@ -358,7 +393,7 @@ class Connection:
                     self.query(one)
                 return
             if self.closed:
-                raise Error("connection is closed")
+                raise Error(ErrorKind.OTHER, "connection is closed")
             try:
                 self._inner.executescript(sql)
             except Exception as e:
@@ -401,7 +436,7 @@ class Connection:
             pass
 
     def close(self) -> None:
-        """Closes the connection: `disconnect` in OCaml, drop in Rust."""
+        """Closes the connection: `disconnect` in OCaml, a drop in Rust."""
         with self._lock:
             if self.closed:
                 return
@@ -412,8 +447,6 @@ class Connection:
             finally:
                 self._inner = None
                 self._db._forget(self)
-
-    disconnect = close
 
     def __enter__(self) -> "Connection":
         return self
@@ -440,9 +473,11 @@ class Database:
         for when it differs from the one asked for."""
         o = dataclasses.replace(options or Options(), **kw)
         path = os.fspath(path)
+        if o.experimental and o.engine is Engine.SQLITE:
+            raise _refused(path, "Turso's experimental features need the turso engine")
         existing = inspect(path)
         if existing is None and not o.create:
-            raise Error(f"{path}: no such database")
+            raise Error(ErrorKind.OTHER, f"{path}: no such database")
         if o.immutable:
             if existing is not None and existing.mvcc:
                 raise _refused(path, "is unsealed (MVCC); open it with Turso and close it before reading it immutably")
@@ -470,7 +505,9 @@ class Database:
         if engine is Engine.TURSO:
             t = _turso()
             try:
-                self._native = t._turso.py_turso_database_open(t._turso.PyTursoDatabaseConfig(path=path))
+                features = ",".join(Experimental(f).value for f in o.experimental) or None
+                self._native = t._turso.py_turso_database_open(
+                    t._turso.PyTursoDatabaseConfig(path=path, experimental_features=features))
             except Exception as e:
                 raise _turso_error(t.lib._map_turso_exception(e)) from e
         # The connection that sets up the file. A new file's page size and
@@ -485,7 +522,7 @@ class Database:
                         c.exec("PRAGMA auto_vacuum = INCREMENTAL")
                 if self.mvcc:
                     if c.query("PRAGMA journal_mode = mvcc") != [("mvcc",)]:
-                        raise Error(f"{path}: Turso did not enable MVCC")
+                        raise Error(ErrorKind.OTHER, f"{path}: Turso did not enable MVCC")
                 elif engine is Engine.SQLITE:
                     if o.journal is Journal.WAL:
                         c.exec("PRAGMA journal_mode = WAL")
@@ -506,7 +543,7 @@ class Database:
         """A connection of its own for one thread. Only MVCC lets several write."""
         with self._lock:
             if self._closed:
-                raise Error(f"{self.path}: database is closed")
+                raise Error(ErrorKind.OTHER, f"{self.path}: database is closed")
             c, self._first = self._first, None
         return c if c is not None else self._open_connection()
 
@@ -555,7 +592,7 @@ class Database:
             first = self._first
             others = [c for c in self._open if c is not first]
         if others:
-            raise Error(f"{self.path}: {len(others)} connection(s) still open; close them first")
+            raise Error(ErrorKind.OTHER, f"{self.path}: {len(others)} connection(s) still open; close them first")
         o = self.options
         if o.engine is not Engine.TURSO or o.read_only:
             if first is not None:
@@ -596,14 +633,14 @@ def _standard(path: str) -> None:
     except sqlite3.Error as e:
         raise _sqlite_error(e) from e
     if mode != "delete":
-        raise Error(f"{path}: journal stayed {mode}")
+        raise Error(ErrorKind.OTHER, f"{path}: journal stayed {mode}")
     for companion in (os.path.splitext(path)[0] + ".db-log", path + "-wal"):
         try:
             size = os.stat(companion).st_size
         except FileNotFoundError:
             continue
         if size:
-            raise Error(f"{companion}: not empty after sealing")
+            raise Error(ErrorKind.OTHER, f"{companion}: not empty after sealing")
         os.remove(companion)
     # Only an index of a WAL that is gone; some SQLite builds leave it behind.
     try:

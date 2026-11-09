@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from firstpair_tursolite import (
-    Database, Engine, Error, ErrorKind, Journal, Options, Seal, inspect, resolve,
+    Database, Engine, Error, ErrorKind, Experimental, Journal, Options, Seal, inspect, resolve,
 )
 from firstpair_tursolite import _standard
 
@@ -74,6 +74,9 @@ def test_sqlite_round_trip(tmp_path):
         c.for_each("SELECT s FROM v", [], got.append)
         assert got == [("naïve",)]
         assert list(c.rows("SELECT b FROM v")) == [(b"\x00\xff",)]
+        r = c.query_rows("SELECT i, s AS name FROM v")
+        assert r.columns == ("i", "name") and r.column("name") == 1 and r.rows[0][1] == "naïve"
+        assert c.query_rows("SELECT s AS who FROM v WHERE 0").columns == ("who",)
         c.close()
 
 
@@ -257,7 +260,7 @@ def test_reading_with_turso_leaves_a_standard_file_alone(tmp_path):
 @turso
 def test_sealing_as_far_as_wal_and_leaving_a_journal_alone(tmp_path):
     p = tmp_path / "kept.sqlar"
-    o = options(Engine.TURSO, Journal.MVCC, seal=Seal.WAL)
+    o = options(Engine.TURSO, Journal.MVCC, seal=Seal.KEEP_WAL)
     write(p, o, range(2))
     assert inspect(p).write_version == 2
     write(p, o, range(2, 3))
@@ -294,6 +297,32 @@ def test_close_refuses_a_companion_with_content(tmp_path):
 
 
 @turso
+def test_without_rowid_with_the_flag_seals_for_sqlite(tmp_path):
+    p = tmp_path / "w.sqlar"
+    table = "CREATE TABLE w(k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID"
+    with Database.open(p, engine=Engine.TURSO) as db:
+        c = db.connect()
+        with pytest.raises(Error, match="WITHOUT ROWID"):
+            c.exec(table)
+        c.close()
+    p.unlink()
+    with Database.open(p, engine=Engine.TURSO, experimental=(Experimental.WITHOUT_ROWID,)) as db:
+        c = db.connect()
+        c.exec(table)
+        c.transaction(lambda: [c.run("INSERT INTO w VALUES (?, ?)", [f"k{i:05d}", bytes([i % 256]) * 300])
+                               for i in range(2000)])
+        c.close()
+    assert companions(p) == []
+    r = immutable(p)
+    assert r.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert r.execute("SELECT count(*) FROM w").fetchone()[0] == 2000
+    r.close()
+    with pytest.raises(Error) as e:
+        Database.open(tmp_path / "s.db", experimental=(Experimental.WITHOUT_ROWID,))
+    assert e.value.kind is ErrorKind.REFUSED
+
+
+@turso
 def test_turso_errors_say_what_failed(tmp_path):
     with Database.open(tmp_path / "x.sqlar", engine=Engine.TURSO, journal=Journal.MVCC) as db:
         c = db.connect()
@@ -302,6 +331,7 @@ def test_turso_errors_say_what_failed(tmp_path):
         with pytest.raises(Error) as e:
             c.run("INSERT INTO t VALUES ('a', 2, NULL)")
         assert e.value.kind is ErrorKind.CONSTRAINT
+        assert c.query_rows("SELECT name AS who, n FROM t").columns == ("who", "n")
         c.close()
 
 

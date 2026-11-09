@@ -18,6 +18,7 @@ depends: [
   "sqlite3" {>= "5.0"}
 ]
 depopts: ["firstpair-tursolite-sdk"]
+conflicts: ["firstpair-tursolite-sdk" {< "0.2.0"}]
 build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]

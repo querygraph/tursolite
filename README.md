@@ -36,7 +36,7 @@ when it matches, so an out-of-date Turso cannot be linked by accident.
 ```rust
 use firstpair_tursolite::{Database, Engine, Journal, Options, Value};
 
-let o = Options { engine: Engine::Turso, journal: Journal::Mvcc, ..Options::default() };
+let o = Options::new().engine(Engine::Turso).journal(Journal::Mvcc);
 let db = Database::open("x.db".as_ref(), &o)?;
 let c = db.connect()?;                      // one per thread
 c.exec("CREATE TABLE IF NOT EXISTS t(a)")?;
@@ -77,30 +77,44 @@ The same names in each language, spelled as each spells them.
 
 | | Rust | OCaml | Python |
 | --- | --- | --- | --- |
-| Open | `Database::open(path, &Options { .., ..Options::default() })` | `open_database ?engine ?journal .. path` | `Database.open(path, Options(..))` or keywords |
-| Options | `engine journal page_size auto_vacuum read_only immutable create busy_ms seal` | the same, as optional arguments | the same, as `Options` fields |
+| Open | `Database::open(path, &Options::new().engine(..)..)` | `open_database ?engine ?journal .. path` | `Database.open(path, Options(..))` or keywords |
+| Options | `engine journal page_size auto_vacuum read_only immutable create busy_ms seal experimental` | the same, as optional arguments | the same, as `Options` fields |
+| Seal | `Seal::{Standard, KeepWal}` | `Standard \| Keep_wal` | `Seal.STANDARD`, `Seal.KEEP_WAL` |
+| Experimental | `Experimental::WithoutRowid` | `Without_rowid` | `Experimental.WITHOUT_ROWID` |
 | Connection | `db.connect()`, dropped | `connect db`, `disconnect c` | `db.connect()`, `c.close()` |
 | Statements | `exec run query` | `exec run query` | `exec run query` |
-| Rows | `for_each query_map query_one query_value::<T>` | `iter fold query_one query_value` | `rows for_each query_one query_value` |
+| Rows | `query_rows for_each query_map query_one query_value::<T>` | `query_rows iter fold query_one query_value` | `query_rows rows for_each query_one query_value` |
+| Column names | `Rows { columns, rows }`, `Row::named` | `{ columns; rows }`, `column` | `Rows(columns, rows)`, `.column` |
 | Values | `Value::{Null, Integer, Real, Text, Blob}`, `From`, `FromValue`, `as_i64 as_f64 as_str as_bytes` | `Null Integer Real Text Blob`, `as_int64 as_int as_float as_string as_option` | `None int float str bytes` |
 | Transaction | `c.transaction(\|\| ..)` | `transaction c (fun () -> ..)` | `c.transaction(lambda: ..)` |
 | Close | `db.close()` | `close db` | `db.close()` |
-| Errors | `Error { kind, conflict, message }` | `Conflict`, `Failure`, `error_kind` | `Error` with `.kind`, `.conflict` |
+| Errors | `Error { kind, message }`, `ErrorKind` | `exception Error of { kind; message }`, `error_kind` | `Error` with `.kind`, `.message`, `ErrorKind` |
 
-An options record grows: Rust callers build `Options` with `..Options::default()`, and OCaml and
-Python take every option by name with a default, so a new option breaks no caller.
+Options grow without breaking callers: Rust's `Options` is `#[non_exhaustive]` and built with one
+method per field from `Options::new()`, and OCaml and Python take every option by name with a
+default. The OCaml interface is `tursolite.mli`; `database` and `connection` are abstract.
 
-Rows come back as arrays of values in column order. Each connection prepares a statement once and
+Rows come back as arrays of values in column order; `query_rows` adds the column names, and a Rust
+`Row` in `for_each` gives a value by name with `named`. Each connection prepares a statement once and
 reuses it (rusqlite's and Turso's caches in Rust, a per-connection cache over the opam `sqlite3`, the
 standard `sqlite3` module's own cache); the OCaml Turso C ABI and `pyturso` prepare each time.
 
 ### Errors
 
-Every error has a kind to match on: `Conflict` (busy, locked, or a concurrent transaction that lost;
-roll back and retry), `Constraint`, `NotADatabase`, `ReadOnly`, `Refused` (one of the rules below),
-and `Other`. In Rust it is `Error::kind`, an `ErrorKind`; in Python `Error.kind`, an `ErrorKind`; in
-OCaml a conflict raises `Conflict` and everything else `Failure`, and `error_kind exn` gives
-`` `Conflict | `Constraint | `Not_a_database | `Read_only | `Refused | `Other ``.
+Every failure is one error with a kind to match on: `Conflict` (busy, locked, or a concurrent
+transaction that lost; roll back and retry), `Constraint`, `NotADatabase`, `ReadOnly`, `Refused` (one
+of the rules below) and `Other`. OCaml spells them `Conflict | Constraint | Not_a_database |
+Read_only | Refused | Other` and raises `Error { kind; message }`; Python raises `Error` with
+`ErrorKind.CONFLICT` and so on.
+
+### Experimental features
+
+`experimental` turns on Turso's experimental features, none by default; asking for one with the SQLite
+engine is refused. The one offered is `WithoutRowid`, for `CREATE TABLE .. WITHOUT ROWID`, which Turso
+0.8.3 refuses without it. With it, Turso writes such a table and a file sealed `Standard` passes
+SQLite's integrity check. Turso 0.8.3 still refuses inserts into one in MVCC mode, will not create a
+secondary index on one, and will not write one that SQLite made with such an index. A table SQLite made without one opens, reads and
+takes writes with no flag (in WAL mode).
 
 ### Reading
 

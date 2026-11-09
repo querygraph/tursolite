@@ -28,7 +28,7 @@ impl Engine {
         match name {
             "sqlite" => Ok(Engine::Sqlite),
             "turso" => Ok(Engine::Turso),
-            _ => Err(Error::new(format!("unknown engine {name}"))),
+            _ => Err(Error::other(format!("unknown engine {name}"))),
         }
     }
 
@@ -48,6 +48,15 @@ impl Engine {
     }
 }
 
+/// The Turso version this build links, pinned exactly; an error without it.
+pub fn turso_version() -> Result<&'static str> {
+    if Engine::Turso.available() {
+        Ok("0.8.3")
+    } else {
+        Err(Error::new(ErrorKind::Refused, "this build does not link Turso"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Journal {
     Delete,
@@ -57,18 +66,46 @@ pub enum Journal {
     Existing,
 }
 
+/// One of Turso's experimental features, off unless asked for. Turso only:
+/// asking for one with the SQLite engine is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Experimental {
+    /// `CREATE TABLE .. WITHOUT ROWID`. Turso 0.8.3 writes such tables in WAL
+    /// mode only (not MVCC), and refuses secondary indexes on them; a sealed
+    /// file is a standard one SQLite reads. Reading and writing a table
+    /// SQLite made needs no flag.
+    WithoutRowid,
+}
+
+impl Experimental {
+    /// The name Turso's C ABI and Python binding use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Experimental::WithoutRowid => "without_rowid",
+        }
+    }
+}
+
 /// What closing leaves of a file Turso wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Seal {
     /// A rollback journal, as SQLite made it, where SQLite is linked.
     Standard,
     /// A WAL file, which Turso reopens as it was.
-    Wal,
+    KeepWal,
 }
 
-/// How to open a file. Build it with `..Options::default()` so that a field
-/// added later does not break the caller.
+/// How to open a file, built from [Options::new] (the defaults) with one
+/// method per field, so that an option added later breaks no caller:
+///
+/// ```
+/// use firstpair_tursolite::{Engine, Journal, Options};
+/// let o = Options::new().engine(Engine::Turso).journal(Journal::Mvcc).page_size(65536);
+/// assert_eq!(o.engine, Engine::Turso);
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Options {
     pub engine: Engine,
     pub journal: Journal,
@@ -83,6 +120,8 @@ pub struct Options {
     pub create: bool,
     pub busy_ms: u64,
     pub seal: Seal,
+    /// Turso's experimental features; none by default, refused for SQLite.
+    pub experimental: Vec<Experimental>,
 }
 
 impl Default for Options {
@@ -97,7 +136,72 @@ impl Default for Options {
             create: true,
             busy_ms: 60000,
             seal: Seal::Standard,
+            experimental: Vec::new(),
         }
+    }
+}
+
+impl Options {
+    /// The defaults: SQLite, a rollback journal, created when missing.
+    pub fn new() -> Options {
+        Options::default()
+    }
+
+    pub fn engine(mut self, engine: Engine) -> Options {
+        self.engine = engine;
+        self
+    }
+
+    pub fn journal(mut self, journal: Journal) -> Options {
+        self.journal = journal;
+        self
+    }
+
+    /// Set on a new file only.
+    pub fn page_size(mut self, bytes: u32) -> Options {
+        self.page_size = Some(bytes);
+        self
+    }
+
+    /// Incremental auto-vacuum on a new file; SQLite only.
+    pub fn auto_vacuum(mut self, on: bool) -> Options {
+        self.auto_vacuum = on;
+        self
+    }
+
+    pub fn read_only(mut self, on: bool) -> Options {
+        self.read_only = on;
+        self
+    }
+
+    /// SQLite's `immutable=1`; implies `read_only`.
+    pub fn immutable(mut self, on: bool) -> Options {
+        self.immutable = on;
+        self
+    }
+
+    /// Whether a missing file is created; on by default.
+    pub fn create(mut self, on: bool) -> Options {
+        self.create = on;
+        self
+    }
+
+    pub fn busy_ms(mut self, ms: u64) -> Options {
+        self.busy_ms = ms;
+        self
+    }
+
+    pub fn seal(mut self, seal: Seal) -> Options {
+        self.seal = seal;
+        self
+    }
+
+    /// Turns on one of Turso's experimental features.
+    pub fn experimental(mut self, feature: Experimental) -> Options {
+        if !self.experimental.contains(&feature) {
+            self.experimental.push(feature);
+        }
+        self
     }
 }
 
@@ -119,14 +223,14 @@ impl Value {
     pub fn as_i64(&self) -> Result<i64> {
         match self {
             Value::Integer(n) => Ok(*n),
-            _ => Err(Error::new("expected an integer".into())),
+            _ => Err(Error::other("expected an integer")),
         }
     }
 
     pub fn as_bytes(&self) -> Result<&[u8]> {
         match self {
             Value::Text(s) | Value::Blob(s) => Ok(s),
-            _ => Err(Error::new("expected text".into())),
+            _ => Err(Error::other("expected text")),
         }
     }
 
@@ -139,7 +243,7 @@ impl Value {
         match self {
             Value::Real(x) => Ok(*x),
             Value::Integer(n) => Ok(*n as f64),
-            _ => Err(Error::new("expected a number".into())),
+            _ => Err(Error::other("expected a number")),
         }
     }
 
@@ -274,24 +378,26 @@ pub enum ErrorKind {
 
 #[derive(Debug, Clone)]
 pub struct Error {
-    pub message: String,
-    /// A concurrent transaction lost; the caller may roll back and retry.
-    /// The same as `kind == ErrorKind::Conflict`.
-    pub conflict: bool,
     pub kind: ErrorKind,
+    pub message: String,
 }
 
 impl Error {
-    pub fn new(message: String) -> Error {
-        Error::of(ErrorKind::Other, message)
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Error {
+        Error { kind, message: message.into() }
     }
 
-    pub fn of(kind: ErrorKind, message: String) -> Error {
-        Error { message, conflict: kind == ErrorKind::Conflict, kind }
+    /// A concurrent transaction lost; the caller may roll back and retry.
+    pub fn conflict(&self) -> bool {
+        self.kind == ErrorKind::Conflict
+    }
+
+    fn other(message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::Other, message)
     }
 
     fn refused(path: &Path, message: &str) -> Error {
-        Error::of(ErrorKind::Refused, format!("{}: {message}", path.display()))
+        Error::new(ErrorKind::Refused, format!("{}: {message}", path.display()))
     }
 
     #[cfg(feature = "turso")]
@@ -308,7 +414,7 @@ impl Error {
             }
             _ => ErrorKind::Other,
         };
-        Error::of(kind, message)
+        Error::new(kind, message)
     }
 }
 
@@ -343,21 +449,21 @@ pub fn inspect(path: &Path) -> Result<Option<Header>> {
     let mut f = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::new(format!("{}: {e}", path.display()))),
+        Err(e) => return Err(Error::other(format!("{}: {e}", path.display()))),
     };
     let mut got = 0;
     while got < 100 {
         match f.read(&mut b[got..]) {
             Ok(0) => break,
             Ok(n) => got += n,
-            Err(e) => return Err(Error::new(format!("{}: {e}", path.display()))),
+            Err(e) => return Err(Error::other(format!("{}: {e}", path.display()))),
         }
     }
     if got == 0 {
         return Ok(None);
     }
     if got < 100 || &b[..16] != b"SQLite format 3\0" {
-        return Err(Error::of(ErrorKind::NotADatabase, format!("{}: not a database", path.display())));
+        return Err(Error::new(ErrorKind::NotADatabase, format!("{}: not a database", path.display())));
     }
     let raw = u16::from_be_bytes([b[16], b[17]]) as u32;
     Ok(Some(Header {
@@ -438,9 +544,12 @@ impl Database {
     /// [resolve] for when it differs from the one asked for.
     pub fn open(path: &Path, options: &Options) -> Result<Database> {
         let mut o = options.clone();
+        if !o.experimental.is_empty() && o.engine == Engine::Sqlite {
+            return Err(Error::refused(path, "Turso's experimental features need the turso engine"));
+        }
         let existing = inspect(path)?;
         if existing.is_none() && !o.create {
-            return Err(Error::new(format!("{}: no such database", path.display())));
+            return Err(Error::other(format!("{}: no such database", path.display())));
         }
         if o.immutable {
             if existing.is_some_and(|h| h.mvcc()) {
@@ -465,13 +574,18 @@ impl Database {
                 if o.read_only {
                     b = b.read_only(true);
                 }
+                for f in &o.experimental {
+                    b = match f {
+                        Experimental::WithoutRowid => b.experimental_without_rowid(true),
+                    };
+                }
                 Backend::Turso(pollster::block_on(b.build()).map_err(|e| {
                     let e = Error::engine(e);
-                    Error::of(e.kind, format!("{}: {}", path.display(), e.message))
+                    Error::new(e.kind, format!("{}: {}", path.display(), e.message))
                 })?)
             }
             #[allow(unreachable_patterns)]
-            e => return Err(Error::new(format!("{} is not linked", e.name()))),
+            e => return Err(Error::other(format!("{} is not linked", e.name()))),
         };
         let db = Database { backend, path: path.to_path_buf(), options: o, mvcc, first: Mutex::new(None) };
         let c = db.open_connection()?;
@@ -487,7 +601,7 @@ impl Database {
             if mvcc {
                 let mode = c.query("PRAGMA journal_mode = mvcc", &[])?;
                 if mode.first().and_then(|r| r.first()) != Some(&Value::text("mvcc")) {
-                    return Err(Error::new(format!("{}: Turso did not enable MVCC", path.display())));
+                    return Err(Error::other(format!("{}: Turso did not enable MVCC", path.display())));
                 }
             } else if db.options.engine == Engine::Sqlite {
                 match db.options.journal {
@@ -561,7 +675,7 @@ impl Database {
             c.exec("PRAGMA wal_checkpoint(TRUNCATE)")?;
         }
         drop(c);
-        let wal = self.options.journal == Journal::Wal || self.options.seal == Seal::Wal;
+        let wal = self.options.journal == Journal::Wal || self.options.seal == Seal::KeepWal;
         let path = self.path.clone();
         drop(self);
         if !wal {
@@ -579,16 +693,16 @@ fn standard(path: &Path) -> Result<()> {
         let c = rusqlite::Connection::open(path).map_err(sqlite_error)?;
         let mode: String = c.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0)).map_err(sqlite_error)?;
         if mode != "delete" {
-            return Err(Error::new(format!("{}: journal stayed {mode}", path.display())));
+            return Err(Error::other(format!("{}: journal stayed {mode}", path.display())));
         }
     }
     let name = path.to_string_lossy();
     for companion in [path.with_extension("db-log"), PathBuf::from(format!("{name}-wal"))] {
         match fs::metadata(&companion) {
             Ok(m) if m.len() == 0 => {
-                fs::remove_file(&companion).map_err(|e| Error::new(format!("{}: {e}", companion.display())))?;
+                fs::remove_file(&companion).map_err(|e| Error::other(format!("{}: {e}", companion.display())))?;
             }
-            Ok(_) => return Err(Error::new(format!("{}: not empty after sealing", companion.display()))),
+            Ok(_) => return Err(Error::other(format!("{}: not empty after sealing", companion.display()))),
             Err(_) => {}
         }
     }
@@ -607,7 +721,7 @@ fn sqlite_error(e: rusqlite::Error) -> Error {
         Some(C::ReadOnly) => ErrorKind::ReadOnly,
         _ => ErrorKind::Other,
     };
-    Error::of(kind, e.to_string())
+    Error::new(kind, e.to_string())
 }
 
 /// `file:` URI of [path] with `immutable=1`, its reserved characters escaped.
@@ -637,16 +751,80 @@ fn to_sqlite(v: &Value) -> rusqlite::types::ToSqlOutput<'_> {
     })
 }
 
-/// A row handed to a callback: the columns of one result row, in order.
-pub type Row<'a> = &'a [Value];
+/// One result row, handed to a callback: its values in column order, with
+/// the column names. It derefs to `[Value]`, so `row[0]` is the first value.
+#[derive(Clone, Copy, Debug)]
+pub struct Row<'a> {
+    columns: &'a [String],
+    values: &'a [Value],
+}
+
+impl<'a> Row<'a> {
+    pub fn columns(&self) -> &'a [String] {
+        self.columns
+    }
+
+    pub fn values(&self) -> &'a [Value] {
+        self.values
+    }
+
+    /// Column [i] as a Rust type.
+    pub fn get<T: FromValue>(&self, i: usize) -> Result<T> {
+        match self.values.get(i) {
+            Some(v) => T::from_value(v),
+            None => Err(Error::other(format!("no column {i}"))),
+        }
+    }
+
+    /// The column named [name] as a Rust type.
+    pub fn named<T: FromValue>(&self, name: &str) -> Result<T> {
+        match self.columns.iter().position(|c| c == name) {
+            Some(i) => self.get(i),
+            None => Err(Error::other(format!("no column {name}"))),
+        }
+    }
+}
+
+impl std::ops::Deref for Row<'_> {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        self.values
+    }
+}
+
+/// The rows of a query with their column names.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+impl Rows {
+    /// The index of the column named [name].
+    pub fn column(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c == name)
+    }
+
+    /// Row [i] with its column names.
+    pub fn row(&self, i: usize) -> Option<Row<'_>> {
+        self.rows.get(i).map(|values| Row { columns: &self.columns, values })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Row<'_>> {
+        self.rows.iter().map(|values| Row { columns: &self.columns, values })
+    }
+}
+
+type Each<'f> = &'f mut dyn FnMut(&[String], &[Value]) -> Result<()>;
 
 #[cfg(feature = "sqlite")]
-fn sqlite_each(c: &rusqlite::Connection, sql: &str, params: &[Value], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<()> {
+fn sqlite_each(c: &rusqlite::Connection, sql: &str, params: &[Value], f: Each) -> Result<Vec<String>> {
     let mut st = c.prepare_cached(sql).map_err(sqlite_error)?;
     for (i, p) in params.iter().enumerate() {
         st.raw_bind_parameter(i + 1, to_sqlite(p)).map_err(sqlite_error)?;
     }
     let n = st.column_count();
+    let columns: Vec<String> = st.column_names().map(|c| c.to_string()).collect();
     let mut rows = st.raw_query();
     let mut row = Vec::with_capacity(n);
     while let Some(r) = rows.next().map_err(sqlite_error)? {
@@ -661,9 +839,9 @@ fn sqlite_each(c: &rusqlite::Connection, sql: &str, params: &[Value], f: &mut dy
                 ValueRef::Blob(b) => Value::Blob(b.to_vec()),
             });
         }
-        f(&row)?;
+        f(&columns, &row)?;
     }
-    Ok(())
+    Ok(columns)
 }
 
 #[cfg(feature = "turso")]
@@ -673,17 +851,18 @@ fn to_turso(v: &Value) -> Result<turso::Value> {
         Value::Integer(n) => turso::Value::Integer(*n),
         Value::Real(x) => turso::Value::Real(*x),
         Value::Text(s) => {
-            turso::Value::Text(String::from_utf8(s.clone()).map_err(|_| Error::new("Turso text must be UTF-8".into()))?)
+            turso::Value::Text(String::from_utf8(s.clone()).map_err(|_| Error::other("Turso text must be UTF-8"))?)
         }
         Value::Blob(b) => turso::Value::Blob(b.clone()),
     })
 }
 
 #[cfg(feature = "turso")]
-fn turso_each(c: &turso::Connection, sql: &str, params: &[Value], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<()> {
+fn turso_each(c: &turso::Connection, sql: &str, params: &[Value], f: Each) -> Result<Vec<String>> {
     let values = params.iter().map(to_turso).collect::<Result<Vec<_>>>()?;
     pollster::block_on(async {
         let mut st = c.prepare_cached(sql).await.map_err(Error::engine)?;
+        let columns = st.column_names();
         let mut rows = st.query(values).await.map_err(Error::engine)?;
         let mut row = Vec::new();
         while let Some(r) = rows.next().await.map_err(Error::engine)? {
@@ -697,9 +876,9 @@ fn turso_each(c: &turso::Connection, sql: &str, params: &[Value], f: &mut dyn Fn
                     turso::Value::Blob(b) => Value::Blob(b),
                 });
             }
-            f(&row)?;
+            f(&columns, &row)?;
         }
-        Ok(())
+        Ok(columns)
     })
 }
 
@@ -707,17 +886,31 @@ impl Connection {
     /// Runs one statement, calling `f` on each row as it is read. The
     /// statement is prepared once per connection and cached.
     pub fn for_each(&self, sql: &str, params: &[Value], mut f: impl FnMut(Row) -> Result<()>) -> Result<()> {
+        self.each(sql, params, &mut |columns, values| f(Row { columns, values })).map(|_| ())
+    }
+
+    fn each(&self, sql: &str, params: &[Value], each: Each) -> Result<Vec<String>> {
         match &self.inner {
             #[cfg(feature = "sqlite")]
-            ConnectionInner::Sqlite(c) => sqlite_each(c, sql, params, &mut f),
+            ConnectionInner::Sqlite(c) => sqlite_each(c, sql, params, each),
             #[cfg(feature = "turso")]
-            ConnectionInner::Turso(c) => turso_each(c, sql, params, &mut f),
+            ConnectionInner::Turso(c) => turso_each(c, sql, params, each),
         }
     }
 
     /// Runs one statement and returns its rows.
     pub fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>> {
         self.query_map(sql, params, |r| Ok(r.to_vec()))
+    }
+
+    /// Runs one statement and returns its rows with the column names.
+    pub fn query_rows(&self, sql: &str, params: &[Value]) -> Result<Rows> {
+        let mut rows = Vec::new();
+        let columns = self.each(sql, params, &mut |_, values| {
+            rows.push(values.to_vec());
+            Ok(())
+        })?;
+        Ok(Rows { columns, rows })
     }
 
     /// Runs one statement and returns `f` of each row.
@@ -739,7 +932,7 @@ impl Connection {
     pub fn query_value<T: FromValue>(&self, sql: &str, params: &[Value]) -> Result<T> {
         match self.query(sql, params)?.as_slice() {
             [row] if row.len() == 1 => T::from_value(&row[0]),
-            rows => Err(Error::new(format!("expected one value from {sql:?}, got {} rows", rows.len()))),
+            rows => Err(Error::other(format!("expected one value from {sql:?}, got {} rows", rows.len()))),
         }
     }
 
@@ -758,7 +951,7 @@ impl Connection {
             ConnectionInner::Sqlite(c) => c.execute_batch(sql).map_err(sqlite_error),
             #[cfg(feature = "turso")]
             // Turso's batch refuses a statement that returns rows, as pragmas do.
-            ConnectionInner::Turso(c) if !sql.contains(';') => turso_each(c, sql, &[], &mut |_| Ok(())),
+            ConnectionInner::Turso(c) if !sql.contains(';') => turso_each(c, sql, &[], &mut |_, _| Ok(())).map(|_| ()),
             #[cfg(feature = "turso")]
             ConnectionInner::Turso(c) => {
                 pollster::block_on(c.execute_batch(sql)).map_err(Error::engine)
@@ -781,7 +974,7 @@ impl Connection {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     let _ = self.exec("ROLLBACK");
-                    if !(self.mvcc && e.conflict) {
+                    if !(self.mvcc && e.conflict()) {
                         return Err(e);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(delay));

@@ -1,5 +1,7 @@
 //! Every engine and journal, the files they leave, and the guards between them.
-use firstpair_tursolite::{Engine, ErrorKind, Journal, Options, Result, Seal, Value, inspect, resolve};
+// Each feature set uses a different part of these imports.
+#![allow(unused_imports, dead_code)]
+use firstpair_tursolite::{Engine, ErrorKind, Experimental, Journal, Options, Result, Seal, Value, inspect, resolve};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,7 +15,7 @@ fn temp(name: &str) -> PathBuf {
 }
 
 fn options(engine: Engine, journal: Journal) -> Options {
-    Options { engine, journal, page_size: Some(65536), ..Options::default() }
+    Options::new().engine(engine).journal(journal).page_size(65536)
 }
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS t(name TEXT PRIMARY KEY, n INT, data BLOB)";
@@ -33,7 +35,7 @@ fn write(path: &Path, o: &Options, rows: std::ops::Range<i64>) -> Result<()> {
 }
 
 fn count(path: &Path, engine: Engine) -> Result<i64> {
-    let o = Options { engine, read_only: true, create: false, ..Options::default() };
+    let o = Options::new().engine(engine).read_only(true).create(false);
     let db = Database::open(path, &o)?;
     let c = db.connect()?;
     let n = c.query("SELECT count(*) FROM t", &[])?[0][0].as_i64()?;
@@ -89,11 +91,23 @@ fn typed_rows_and_errors() {
     })
     .unwrap();
     assert_eq!(seen, 2);
+    let rows = c.query_rows("SELECT name, n AS number FROM t ORDER BY name", &[]).unwrap();
+    assert_eq!(rows.columns, ["name", "number"]);
+    assert_eq!(rows.column("number"), Some(1));
+    assert_eq!(rows.row(0).unwrap().named::<i64>("number").unwrap(), 1);
+    assert_eq!(c.query_rows("SELECT name AS who FROM t WHERE 0", &[]).unwrap().columns, ["who"]);
+    let mut named = Vec::new();
+    c.for_each("SELECT name AS who FROM t ORDER BY who", &[], |r| {
+        named.push(r.named::<String>("who")?);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(named, ["a", "b"]);
     let e = c.run("INSERT INTO t VALUES ('a', 2, NULL)", &[]).unwrap_err();
-    assert_eq!((e.kind, e.conflict), (ErrorKind::Constraint, false), "{e}");
+    assert_eq!((e.kind, e.conflict()), (ErrorKind::Constraint, false), "{e}");
     drop(c);
     db.close().unwrap();
-    let o = Options { immutable: true, create: false, ..Options::default() };
+    let o = Options::new().immutable(true).create(false);
     let db = Database::open(&p, &o).unwrap();
     let c = db.connect().unwrap();
     assert_eq!(c.query_value::<i64>("SELECT count(*) FROM t", &[]).unwrap(), 2);
@@ -142,12 +156,12 @@ mod both {
     fn an_auto_vacuum_file_stays_with_sqlite() {
         let d = temp("autovacuum");
         let p = d.join("stock.sqlar");
-        let o = Options { auto_vacuum: true, ..options(Engine::Sqlite, Journal::Delete) };
+        let o = options(Engine::Sqlite, Journal::Delete).auto_vacuum(true);
         write(&p, &o, 0..2).unwrap();
         let before = std::fs::read(&p).unwrap();
         assert!(inspect(&p).unwrap().unwrap().auto_vacuum);
         for j in [Journal::Delete, Journal::Wal, Journal::Mvcc] {
-            let e = write(&p, &options(Engine::Turso, j), 2..3).err().expect("Turso must refuse");
+            let e = write(&p, &options(Engine::Turso, j), 2..3).expect_err("Turso must refuse");
             assert!(e.message.contains("auto-vacuum") && e.kind == ErrorKind::Refused, "{e}");
         }
         assert_eq!(resolve(&p, Engine::Turso, true).unwrap(), Engine::Sqlite);
@@ -179,7 +193,7 @@ mod both {
         drop(db); // a crash, in effect: never sealed
         assert!(inspect(&p).unwrap().unwrap().mvcc());
         assert_eq!(resolve(&p, Engine::Sqlite, false).unwrap(), Engine::Turso);
-        let immutable = Options { immutable: true, ..Options::default() };
+        let immutable = Options::new().immutable(true);
         assert_eq!(Database::open(&p, &immutable).err().unwrap().kind, ErrorKind::Refused);
         let db = Database::open(&p, &options(Engine::Sqlite, Journal::Delete)).unwrap();
         assert_eq!(db.engine(), Engine::Turso);
@@ -196,7 +210,7 @@ mod both {
     fn sealing_as_far_as_wal_and_leaving_a_journal_alone() {
         let d = temp("wal-seal");
         let p = d.join("kept.sqlar");
-        let o = Options { seal: Seal::Wal, ..options(Engine::Turso, Journal::Mvcc) };
+        let o = options(Engine::Turso, Journal::Mvcc).seal(Seal::KeepWal);
         write(&p, &o, 0..2).unwrap();
         assert_eq!(inspect(&p).unwrap().unwrap().write_version, 2);
         write(&p, &o, 2..3).unwrap();
@@ -205,6 +219,55 @@ mod both {
         write(&p, &options(Engine::Sqlite, Journal::Wal), 0..1).unwrap();
         write(&p, &options(Engine::Sqlite, Journal::Existing), 1..2).unwrap();
         assert_eq!(inspect(&p).unwrap().unwrap().write_version, 2);
+    }
+
+    #[test]
+    fn without_rowid_with_the_flag_seals_for_sqlite() {
+        let d = temp("without-rowid");
+        let p = d.join("w.sqlar");
+        let table = "CREATE TABLE w(k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID";
+        let o = Options::new().engine(Engine::Turso);
+        let db = Database::open(&p, &o).unwrap();
+        let e = db.connect().unwrap().exec(table).unwrap_err();
+        assert!(e.message.contains("WITHOUT ROWID"), "{e}");
+        db.close().unwrap();
+        std::fs::remove_file(&p).unwrap();
+        let o = o.experimental(Experimental::WithoutRowid);
+        let db = Database::open(&p, &o).unwrap();
+        let c = db.connect().unwrap();
+        c.exec(table).unwrap();
+        c.transaction(|| {
+            for i in 0..2000i64 {
+                c.run("INSERT INTO w VALUES (?, ?)", &[Value::text(&format!("k{i:05}")), Value::Blob(vec![i as u8; 300])])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        drop(c);
+        db.close().unwrap();
+        let o = Options::new().immutable(true).create(false);
+        let db = Database::open(&p, &o).unwrap();
+        let c = db.connect().unwrap();
+        assert_eq!(c.query_value::<String>("PRAGMA integrity_check", &[]).unwrap(), "ok");
+        assert_eq!(c.query_value::<i64>("SELECT count(*) FROM w", &[]).unwrap(), 2000);
+        drop(c);
+        db.close().unwrap();
+        // A table SQLite made, with no secondary index, needs no flag.
+        let q = d.join("by-sqlite.db");
+        let db = Database::open(&q, &Options::new()).unwrap();
+        db.connect().unwrap().exec(table).unwrap();
+        db.close().unwrap();
+        let without = Database::open(&q, &Options::new().engine(Engine::Turso)).and_then(|db| {
+            let c = db.connect()?;
+            c.run("INSERT INTO w VALUES ('a', x'00')", &[])?;
+            let n = c.query_value::<i64>("SELECT count(*) FROM w", &[])?;
+            drop(c);
+            db.close()?;
+            Ok(n)
+        });
+        assert_eq!(without.unwrap(), 1, "Turso reads and writes it without the flag");
+        let sqlite = Options::new().experimental(Experimental::WithoutRowid);
+        assert_eq!(Database::open(&d.join("s.db"), &sqlite).err().unwrap().kind, ErrorKind::Refused);
     }
 
     #[test]
@@ -251,7 +314,7 @@ fn reads_a_file_python_sealed() {
     let h = inspect(&p).unwrap().unwrap();
     assert!(!h.mvcc() && h.write_version == 1, "sealed to a rollback journal: {h:?}");
     assert_eq!(resolve(&p, Engine::Sqlite, true).unwrap(), Engine::Sqlite);
-    let db = Database::open(&p, &Options { read_only: true, create: false, ..Options::default() }).unwrap();
+    let db = Database::open(&p, &Options::new().read_only(true).create(false)).unwrap();
     let c = db.connect().unwrap();
     assert_eq!(c.query("PRAGMA integrity_check", &[]).unwrap()[0][0], Value::text("ok"));
     assert_eq!(c.query("SELECT count(*) FROM t", &[]).unwrap()[0][0].as_i64().unwrap(), rows);

@@ -7,6 +7,7 @@
 #include <caml/alloc.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
+#include <caml/callback.h>
 #include <caml/threads.h>
 #include "turso.h"
 
@@ -28,11 +29,23 @@ static struct custom_operations conn_ops = {
   "firstpair.tursolite.connection", conn_finalize, custom_compare_default, custom_hash_default,
   custom_serialize_default, custom_deserialize_default, custom_compare_ext_default, custom_fixed_length_default };
 
+/* Raises Tursolite_sdk.Turso_error (status, message). */
 static void fail_status(turso_status_code_t code, const char *error) {
-  char message[2048];
-  snprintf(message, sizeof(message), "Turso status %d: %s", code, error ? error : "no error text");
+  CAMLparam0();
+  CAMLlocal1(message);
+  message = caml_copy_string(error ? error : "no error text");
   if (error) turso_str_deinit(error);
-  caml_failwith(message);
+  value args[2] = { Val_int(code), message };
+  caml_raise_with_args(*caml_named_value("tursolite_sdk_error"), 2, args);
+  CAMLnoreturn;
+}
+static void fail_misuse(const char *text) {
+  CAMLparam0();
+  CAMLlocal1(message);
+  message = caml_copy_string(text);
+  value args[2] = { Val_int(TURSO_MISUSE), message };
+  caml_raise_with_args(*caml_named_value("tursolite_sdk_error"), 2, args);
+  CAMLnoreturn;
 }
 
 CAMLprim value tursolite_version(value unit) {
@@ -40,11 +53,13 @@ CAMLprim value tursolite_version(value unit) {
   CAMLreturn(caml_copy_string(turso_version()));
 }
 
-CAMLprim value tursolite_open(value path, value read_only) {
-  CAMLparam2(path, read_only);
+/* [features] is Turso's comma separated list of experimental features, or "". */
+CAMLprim value tursolite_open(value path, value read_only, value features) {
+  CAMLparam3(path, read_only, features);
   CAMLlocal1(handle);
   const char *error = NULL; const turso_database_t *db = NULL;
   turso_database_config_t config = { .path = String_val(path), .async_io = 0,
+    .experimental_features = caml_string_length(features) ? String_val(features) : NULL,
     .open_flags = Bool_val(read_only) ? TURSO_DATABASE_OPEN_READONLY : TURSO_DATABASE_OPEN_DEFAULT };
   turso_status_code_t code = turso_database_new(&config, &db, &error);
   if (code != TURSO_OK) fail_status(code, error);
@@ -55,11 +70,13 @@ CAMLprim value tursolite_open(value path, value read_only) {
   CAMLreturn(handle);
 }
 
+
+
 CAMLprim value tursolite_connect(value database, value busy_ms) {
   CAMLparam2(database, busy_ms);
   CAMLlocal1(handle);
   const char *error = NULL; turso_connection_t *conn = NULL;
-  if (!DB(database)->ptr) caml_failwith("Closed Turso database");
+  if (!DB(database)->ptr) fail_misuse("Closed Turso database");
   turso_status_code_t code = turso_database_connect(DB(database)->ptr, &conn, &error);
   if (code != TURSO_OK) fail_status(code, error);
   turso_connection_set_busy_timeout_ms(conn, Long_val(busy_ms));
@@ -90,13 +107,23 @@ static turso_status_code_t bind_value(turso_statement_t *stmt, size_t position, 
 CAMLprim value tursolite_execute(value connection, value sql, value params) {
   CAMLparam3(connection, sql, params);
   CAMLlocal5(list, row, cell, item, payload);
+  CAMLlocal2(columns, result);
   const char *error = NULL; turso_statement_t *stmt = NULL;
-  if (!CONN(connection)->ptr) caml_failwith("Closed Turso connection");
+  if (!CONN(connection)->ptr) fail_misuse("Closed Turso connection");
   turso_status_code_t code = turso_connection_prepare_single(CONN(connection)->ptr, String_val(sql), &stmt, &error);
   if (code != TURSO_OK) fail_status(code, error);
   for (mlsize_t i = 0; i < Wosize_val(params); i++) {
     code = bind_value(stmt, i + 1, Field(params, i));
     if (code != TURSO_OK) { turso_statement_deinit(stmt); fail_status(code, NULL); }
+  }
+  mlsize_t ncols = turso_statement_column_count(stmt);
+  columns = caml_alloc(ncols, 0);
+  for (mlsize_t i = 0; i < ncols; i++) Store_field(columns, i, Val_unit);
+  for (mlsize_t i = 0; i < ncols; i++) {
+    const char *name = turso_statement_column_name(stmt, i);
+    item = caml_copy_string(name ? name : "");
+    if (name) turso_str_deinit(name);
+    Store_field(columns, i, item);
   }
   list = Val_emptylist;
   for (;;) {
@@ -122,7 +149,7 @@ CAMLprim value tursolite_execute(value connection, value sql, value params) {
           payload = caml_alloc_initialized_string(turso_statement_row_value_bytes_count(stmt, i),
                                                   turso_statement_row_value_bytes_ptr(stmt, i));
           item = caml_alloc(1, kind == TURSO_TYPE_TEXT ? 2 : 3); Store_field(item, 0, payload); break;
-        default: turso_statement_deinit(stmt); caml_failwith("Unknown Turso result type");
+        default: turso_statement_deinit(stmt); fail_misuse("Unknown Turso result type");
       }
       Store_field(row, i, item);
     }
@@ -137,5 +164,8 @@ CAMLprim value tursolite_execute(value connection, value sql, value params) {
     row = caml_alloc(2, 0); Store_field(row, 0, Field(list, 0)); Store_field(row, 1, cell);
     cell = row; list = Field(list, 1);
   }
-  CAMLreturn(cell);
+  result = caml_alloc(2, 0);
+  Store_field(result, 0, columns);
+  Store_field(result, 1, cell);
+  CAMLreturn(result);
 }

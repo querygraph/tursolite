@@ -26,8 +26,8 @@ let count ?(engine = Sqlite) p =
   disconnect c; close db; n
 
 let bytes p = In_channel.with_open_bin p In_channel.input_all
-let raises f = match f () with _ -> None | exception Failure m -> Some m
-let kind f = match f () with _ -> None | exception e -> Some (error_kind e)
+let raises f = match f () with _ -> None | exception Error { message; _ } -> Some message
+let kind f = match f () with _ -> None | exception Error { kind; _ } -> Some kind
 
 let () =
   List.iter (fun (n, j) ->
@@ -57,16 +57,19 @@ let () =
     (* The same SQL while its statement is in use. *)
     seen := !seen + List.length (query c "SELECT name FROM t" []));
   check (!seen = 4) "iter, nested";
-  check (kind (fun () -> run c "INSERT INTO t VALUES ('a', 2, NULL)" []) = Some `Constraint) "a constraint";
+  let r = query_rows c "SELECT name, n AS number FROM t ORDER BY name" [] in
+  check (r.columns = [| "name"; "number" |] && column r "number" = 1) "column names";
+  check ((query_rows c "SELECT name AS who FROM t WHERE 0" []).columns = [| "who" |]) "column names, no rows";
+  check (kind (fun () -> run c "INSERT INTO t VALUES ('a', 2, NULL)" []) = Some Constraint) "a constraint";
   disconnect c; close db;
   let db = open_database ~immutable:true ~create:false p in
   let c = connect db in
   check (as_int (query_value c "SELECT count(*) FROM t" []) = 2) "immutable reads";
-  check (kind (fun () -> run c "DELETE FROM t" []) = Some `Read_only) "immutable refuses a write";
+  check (kind (fun () -> run c "DELETE FROM t" []) = Some Read_only) "immutable refuses a write";
   disconnect c; close db;
   let junk = path "junk.db" in
   Out_channel.with_open_bin junk (fun oc -> output_string oc (String.make 200 'x'));
-  check (kind (fun () -> open_database junk) = Some `Not_a_database) "not a database";
+  check (kind (fun () -> open_database junk) = Some Not_a_database) "not a database";
   let p = path "stock.sqlar" in
   write ~engine:Sqlite ~auto_vacuum:true p 0 2;
   check (Option.get (inspect p)).auto_vacuum "auto-vacuum set";
@@ -74,7 +77,7 @@ let () =
     let before = bytes p in
     List.iter (fun j ->
       match raises (fun () -> write ~engine:Turso ~journal:j p 2 3) with
-      | Some m -> check (error_kind (Failure m) = `Refused) m
+      | Some m -> check (String.length m > 0) m
       | None -> check false "Turso must refuse auto-vacuum") [Delete; Wal; Mvcc];
     check (count ~engine:Turso p = 2) "a read falls to SQLite";
     check (bytes p = before) "nothing asked of Turso touched the file";
@@ -105,19 +108,20 @@ let () =
     exec c "PRAGMA wal_checkpoint(TRUNCATE)";
     check (is_mvcc (Option.get (inspect p))) "in MVCC mode";
     check (resolve p Sqlite ~read_only:false = Turso) "an MVCC file resolves to Turso";
-    check (kind (fun () -> open_database ~immutable:true p) = Some `Refused) "no immutable open unsealed";
-    check (kind (fun () -> run c "INSERT INTO t VALUES ('a', 2, NULL)" []) = Some `Constraint) "a Turso constraint";
+    check (kind (fun () -> open_database ~immutable:true p) = Some Refused) "no immutable open unsealed";
+    check (kind (fun () -> run c "INSERT INTO t VALUES ('a', 2, NULL)" []) = Some Constraint) "a Turso constraint";
+    check ((query_rows c "SELECT name AS who, n FROM t" []).columns = [| "who"; "n" |]) "Turso column names";
     disconnect c; close db;
     check (count p = 1) "sealed";
     (* Sealed only as far as WAL when asked: what dng-compare's archives do. *)
     let p = path "kept.sqlar" in
-    let db = open_database ~engine:Turso ~journal:Mvcc ~seal:Sealed_wal p in
+    let db = open_database ~engine:Turso ~journal:Mvcc ~seal:Keep_wal p in
     let c = connect db in
     exec c schema;
     transaction c (fun () -> run c "INSERT INTO t VALUES ('a', 1, x'00')" []);
     disconnect c; close db;
     check ((Option.get (inspect p)).write_version = 2) "a WAL file";
-    let db = open_database ~engine:Turso ~journal:Mvcc ~seal:Sealed_wal p in
+    let db = open_database ~engine:Turso ~journal:Mvcc ~seal:Keep_wal p in
     let c = connect db in
     check (query c "SELECT count(*) FROM t" [] = [ [| Integer 1L |] ]) "and reopens";
     disconnect c; close db;
@@ -126,6 +130,29 @@ let () =
     write ~engine:Sqlite ~journal:Wal p 0 1;
     write ~engine:Sqlite ~journal:Existing p 1 2;
     check ((Option.get (inspect p)).write_version = 2) "Existing keeps WAL";
+    (* WITHOUT ROWID: refused by Turso without the flag; with it, sealed to a
+       standard file that SQLite reads immutably. *)
+    let p = path "without-rowid.sqlar" in
+    let table = "CREATE TABLE w(k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID" in
+    let db = open_database ~engine:Turso p in
+    let c = connect db in
+    check (raises (fun () -> exec c table) <> None) "WITHOUT ROWID needs the flag";
+    disconnect c; close db; Sys.remove p;
+    let db = open_database ~engine:Turso ~experimental:[Without_rowid] p in
+    let c = connect db in
+    exec c table;
+    transaction c (fun () ->
+      for i = 0 to 1999 do
+        run c "INSERT INTO w VALUES (?, ?)" [Text (Printf.sprintf "k%05d" i); Blob (String.make 300 'w')]
+      done);
+    disconnect c; close db;
+    let db = open_database ~immutable:true ~create:false p in
+    let c = connect db in
+    check (query_value c "PRAGMA integrity_check" [] = Text "ok") "WITHOUT ROWID: integrity";
+    check (as_int (query_value c "SELECT count(*) FROM w" []) = 2000) "WITHOUT ROWID: rows";
+    disconnect c; close db;
+    check (kind (fun () -> open_database ~experimental:[Without_rowid] (path "s.db")) = Some Refused)
+      "experimental features refused for SQLite";
     (* Four domains writing one database, sharing one row. *)
     let p = path "concurrent.sqlar" in
     let db = open_database ~engine:Turso ~journal:Mvcc ~page_size:65536 p in
