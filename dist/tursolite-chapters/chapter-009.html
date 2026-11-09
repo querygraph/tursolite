@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>The rules</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-010.html" accesskey="n" rel="next">Experimental features</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-008.html" accesskey="p" rel="previous">Errors</a>
+</span>
+</div>
+</nav>
+<h1 data-number="8" id="the-rules"><span
+class="header-section-number">8</span> The rules</h1>
+<p>Each rule came from testing Turso against stock SQLite, on Turso
+0.8.2 and 0.8.3, and is enforced when a file is opened:</p>
+<ul>
+<li><strong>Turso never writes a file with auto-vacuum.</strong> With
+its experimental flag on, stock SQLite’s integrity check then fails on
+the file. Reads fall to SQLite, and a write is an error.</li>
+<li><strong>A file in MVCC mode opens only with Turso.</strong> Its
+header bytes 18 and 19 are 255, and SQLite calls it “not a
+database”.</li>
+<li><strong>Turso has no rollback journal.</strong> It ignores
+<code>journal_mode = DELETE</code>, which is why <code>close</code>
+seals.</li>
+<li><strong>Opening a standard file with Turso for writing changes its
+header.</strong> A read-only open does not.</li>
+<li><strong>Foreign keys are off on every SQLite connection.</strong>
+The bundled SQLite in Rust turns them on by default and the system’s
+does not, so one program behaved differently in two languages until the
+library set one rule. A program that wants them says so with
+<code>PRAGMA foreign_keys = ON</code>.</li>
+</ul>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>Tursolite</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+</span>
+<span class="navlink">
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-001.html" accesskey="n" rel="next">Tursolite</a>
+</span>
+<span class="navlink">
+</span>
+</div>
+</nav>
+<header id="title-block-header">
+<h1 class="title">Tursolite</h1>
+<p class="subtitle">A Rust, OCaml, OxCaml and Python library for
+parallel SQLite-compatible databases</p>
+<p class="author">Alexy Khrabrov, with Claude as co-author</p>
+<p class="date">2026-11-09</p>
+</header>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="chapter-002.html#about-this-manual"
+id="toc-about-this-manual"><span class="toc-section-number">1</span>
+About this manual</a></li>
+<li><a href="chapter-003.html#what-tursolite-is"
+id="toc-what-tursolite-is"><span class="toc-section-number">2</span>
+What tursolite is</a>
+<ul>
+<li><a href="chapter-003.html#where-it-fits"
+id="toc-where-it-fits"><span class="toc-section-number">2.1</span> Where
+it fits</a></li>
+<li><a href="chapter-003.html#what-it-is-not"
+id="toc-what-it-is-not"><span class="toc-section-number">2.2</span> What
+it is not</a></li>
+</ul></li>
+<li><a href="chapter-004.html#getting-started"
+id="toc-getting-started"><span class="toc-section-number">3</span>
+Getting started</a>
+<ul>
+<li><a href="chapter-004.html#building" id="toc-building"><span
+class="toc-section-number">3.1</span> Building</a></li>
+<li><a href="chapter-004.html#a-first-program"
+id="toc-a-first-program"><span class="toc-section-number">3.2</span> A
+first program</a></li>
+</ul></li>
+<li><a href="chapter-005.html#engines-journals-and-sealing"
+id="toc-engines-journals-and-sealing"><span
+class="toc-section-number">4</span> Engines, journals and sealing</a>
+<ul>
+<li><a href="chapter-005.html#the-engine" id="toc-the-engine"><span
+class="toc-section-number">4.1</span> The engine</a></li>
+<li><a href="chapter-005.html#the-journal" id="toc-the-journal"><span
+class="toc-section-number">4.2</span> The journal</a></li>
+<li><a href="chapter-005.html#sealing" id="toc-sealing"><span
+class="toc-section-number">4.3</span> Sealing</a></li>
+</ul></li>
+<li><a href="chapter-006.html#opening-a-file"
+id="toc-opening-a-file"><span class="toc-section-number">5</span>
+Opening a file</a>
+<ul>
+<li><a href="chapter-006.html#options" id="toc-options"><span
+class="toc-section-number">5.1</span> Options</a></li>
+<li><a href="chapter-006.html#reading-without-writing"
+id="toc-reading-without-writing"><span
+class="toc-section-number">5.2</span> Reading without writing</a></li>
+<li><a href="chapter-006.html#choosing-an-engine"
+id="toc-choosing-an-engine"><span class="toc-section-number">5.3</span>
+Choosing an engine</a></li>
+</ul></li>
+<li><a href="chapter-007.html#connections-statements-and-transactions"
+id="toc-connections-statements-and-transactions"><span
+class="toc-section-number">6</span> Connections, statements and
+transactions</a>
+<ul>
+<li><a href="chapter-007.html#threads-and-domains"
+id="toc-threads-and-domains"><span class="toc-section-number">6.1</span>
+Threads and domains</a></li>
+<li><a href="chapter-007.html#transactions" id="toc-transactions"><span
+class="toc-section-number">6.2</span> Transactions</a></li>
+<li><a href="chapter-007.html#statements-and-rows"
+id="toc-statements-and-rows"><span class="toc-section-number">6.3</span>
+Statements and rows</a></li>
+<li><a href="chapter-007.html#values" id="toc-values"><span
+class="toc-section-number">6.4</span> Values</a></li>
+</ul></li>
+<li><a href="chapter-008.html#errors" id="toc-errors"><span
+class="toc-section-number">7</span> Errors</a></li>
+<li><a href="chapter-009.html#the-rules" id="toc-the-rules"><span
+class="toc-section-number">8</span> The rules</a></li>
+<li><a href="chapter-010.html#experimental-features"
+id="toc-experimental-features"><span class="toc-section-number">9</span>
+Experimental features</a></li>
+<li><a href="chapter-011.html#python" id="toc-python"><span
+class="toc-section-number">10</span> Python</a></li>
+<li><a href="chapter-012.html#testing" id="toc-testing"><span
+class="toc-section-number">11</span> Testing</a></li>
+<li><a href="chapter-013.html#limits" id="toc-limits"><span
+class="toc-section-number">12</span> Limits</a></li>
+<li><a href="chapter-014.html#reference" id="toc-reference"><span
+class="toc-section-number">13</span> Reference</a>
+<ul>
+<li><a href="chapter-014.html#rust" id="toc-rust"><span
+class="toc-section-number">13.1</span> Rust</a></li>
+<li><a href="chapter-014.html#ocaml-and-oxcaml"
+id="toc-ocaml-and-oxcaml"><span class="toc-section-number">13.2</span>
+OCaml and OxCaml</a></li>
+<li><a href="chapter-014.html#python-1" id="toc-python-1"><span
+class="toc-section-number">13.3</span> Python</a></li>
+</ul></li>
+</ul>
+</nav>
+
+</body>
+</html>

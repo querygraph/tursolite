@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>Limits</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-014.html" accesskey="n" rel="next">Reference</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-012.html" accesskey="p" rel="previous">Testing</a>
+</span>
+</div>
+</nav>
+<h1 data-number="12" id="limits"><span
+class="header-section-number">12</span> Limits</h1>
+<ul>
+<li><strong>Turso is pinned at 0.8.3.</strong> Its experimental
+features, and the rules above, are re-tested before the pin moves.</li>
+<li><strong><code>Without_rowid</code> tables cannot take inserts under
+MVCC</strong> in Turso 0.8.3, even with the experimental flag. A program
+that wants both writes an ordinary rowid table under Turso, then
+rebuilds it <code>WITHOUT ROWID</code> with SQLite once the concurrent
+writing is done; Mechanic’s stub store is made that way.</li>
+<li><strong>The OCaml Turso C ABI and <code>pyturso</code> prepare every
+statement</strong>, which costs time on statement-heavy work.</li>
+<li><strong>An unsealed file</strong>, left by a crash, stays in Turso’s
+form until Turso opens it again. SQLite, and <code>immutable</code>,
+refuse it in MVCC mode.</li>
+</ul>
+</body>
+</html>

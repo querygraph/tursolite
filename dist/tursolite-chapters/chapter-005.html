@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>Engines, journals and sealing</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-006.html" accesskey="n" rel="next">Opening a file</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-004.html" accesskey="p" rel="previous">Getting started</a>
+</span>
+</div>
+</nav>
+<h1 data-number="4" id="engines-journals-and-sealing"><span
+class="header-section-number">4</span> Engines, journals and
+sealing</h1>
+<h2 data-number="4.1" id="the-engine"><span
+class="header-section-number">4.1</span> The engine</h2>
+<p><code>engine</code> is <code>Sqlite</code> (the default) or
+<code>Turso</code>. The engine that actually opened a file is reported
+by <code>engine</code> on the database, because the library may choose
+differently from what was asked when the file requires it (see
+<em>Choosing an engine</em> below).</p>
+<h2 data-number="4.2" id="the-journal"><span
+class="header-section-number">4.2</span> The journal</h2>
+<p><code>journal</code> says how the file keeps its transactions:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Journal</th>
+<th>Meaning</th>
+<th>Engines</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Delete</code> (default)</td>
+<td>SQLite’s rollback journal</td>
+<td>SQLite; with Turso, the file is sealed back to it on close</td>
+</tr>
+<tr>
+<td><code>Wal</code></td>
+<td>write-ahead log</td>
+<td>both</td>
+</tr>
+<tr>
+<td><code>Mvcc</code></td>
+<td>Turso’s multi-version concurrency: concurrent writers</td>
+<td>Turso only; asked of SQLite it is refused</td>
+</tr>
+<tr>
+<td><code>Existing</code></td>
+<td>leave the file’s journal as it is found</td>
+<td>both</td>
+</tr>
+</tbody>
+</table>
+<p><code>Existing</code> is for programs that manage their own files,
+such as DNG Compare’s archives, which stay in WAL between runs.</p>
+<h2 data-number="4.3" id="sealing"><span
+class="header-section-number">4.3</span> Sealing</h2>
+<p>Turso and SQLite disagree about what a file looks like while it is in
+use. So <code>close</code> <em>seals</em> what Turso wrote: it
+checkpoints, leaves MVCC, checkpoints again, and then, as the
+<code>seal</code> option says:</p>
+<ul>
+<li><strong><code>Standard</code></strong> (the default) hands the file
+to SQLite to return it to a rollback journal, as SQLite itself would
+have made it, where SQLite is linked.</li>
+<li><strong><code>Keep_wal</code></strong> (<code>KeepWal</code> in
+Rust, <code>KEEP_WAL</code> in Python) leaves it a WAL file, which Turso
+reopens as it was.</li>
+</ul>
+<p>Empty <code>-wal</code> and <code>.db-log</code> files are removed.
+One with content is an error, because it may hold commits. A crash
+leaves a file unsealed until Turso next opens it.</p>
+<p>Close every connection before <code>close</code>.</p>
+</body>
+</html>

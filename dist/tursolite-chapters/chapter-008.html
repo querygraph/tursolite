@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>Errors</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-009.html" accesskey="n" rel="next">The rules</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-007.html" accesskey="p" rel="previous">Connections, statements and transactions</a>
+</span>
+</div>
+</nav>
+<h1 data-number="7" id="errors"><span
+class="header-section-number">7</span> Errors</h1>
+<p>Every failure is one error with a kind to match on, and a
+message:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Meaning</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Conflict</code></td>
+<td>busy, locked, or a concurrent transaction that lost</td>
+<td>roll back and retry; <code>transaction</code> does</td>
+</tr>
+<tr>
+<td><code>Constraint</code></td>
+<td>a constraint failed</td>
+<td>a problem in the data</td>
+</tr>
+<tr>
+<td><code>Not_a_database</code></td>
+<td>the file is not SQLite, or is MVCC and SQLite was used</td>
+<td>check the file and the engine</td>
+</tr>
+<tr>
+<td><code>Read_only</code></td>
+<td>a write on a read-only open</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Refused</code></td>
+<td>one of the rules below, or an engine this build does not link</td>
+<td>read the message</td>
+</tr>
+<tr>
+<td><code>Other</code></td>
+<td>anything else</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Rust has <code>Error { kind, message }</code> with
+<code>ErrorKind</code>. OCaml raises
+<code>exception Error of { kind; message }</code>, with
+<code>error_kind_name</code> for messages. Python raises
+<code>Error</code> with <code>.kind</code>
+(<code>ErrorKind.CONFLICT</code> and so on) and
+<code>.message</code>.</p>
+</body>
+</html>

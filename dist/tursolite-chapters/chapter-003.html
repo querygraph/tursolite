@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>What tursolite is</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-004.html" accesskey="n" rel="next">Getting started</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-002.html" accesskey="p" rel="previous">About this manual</a>
+</span>
+</div>
+</nav>
+<h1 data-number="2" id="what-tursolite-is"><span
+class="header-section-number">2</span> What tursolite is</h1>
+<p>A program that wants an embedded SQL file usually reaches for SQLite.
+Turso is a rewrite of SQLite in Rust that keeps its file format and adds
+what SQLite lacks, above all MVCC: several connections writing at once,
+each in its own transaction, with conflicts detected at commit.</p>
+<p>The two engines look alike from far away, and differ in ways that
+matter up close. Turso has no rollback journal. A file it writes in MVCC
+mode is one stock SQLite refuses to open. Opening a standard file with
+Turso for writing changes its header. Each language reaches each engine
+differently too: Rust through crates, OCaml through the opam
+<code>sqlite3</code> package and a C library, Python through the
+standard <code>sqlite3</code> module and <code>pyturso</code>.</p>
+<p>firstpair-tursolite puts one interface over both engines, with the
+same shape in four languages:</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th></th>
+<th>SQLite</th>
+<th>Turso</th>
+<th>Turso MVCC, concurrent writers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rust</td>
+<td>rusqlite, bundled</td>
+<td>the <code>turso</code> crate</td>
+<td>threads, a connection each</td>
+</tr>
+<tr>
+<td>OxCaml 5.4.0+ox</td>
+<td>the opam <code>sqlite3</code></td>
+<td>the C ABI</td>
+<td>domains, a connection each</td>
+</tr>
+<tr>
+<td>Stock OCaml 5</td>
+<td>the opam <code>sqlite3</code></td>
+<td>the C ABI</td>
+<td>domains, a connection each</td>
+</tr>
+<tr>
+<td>Python 3.12+</td>
+<td>the standard <code>sqlite3</code></td>
+<td><code>pyturso</code></td>
+<td>threads, a connection each</td>
+</tr>
+</tbody>
+</table>
+<p>A program written against it chooses an engine with one option, and
+the library keeps the file one that both engines, and stock
+<code>sqlite3</code>, can read when it is closed.</p>
+<h2 data-number="2.1" id="where-it-fits"><span
+class="header-section-number">2.1</span> Where it fits</h2>
+<p>tursolite is the database layer under three FirstPair projects. Each
+uses it for files that must outlive the program that wrote them:</p>
+<ul>
+<li><strong><a
+href="https://firstpair.org/books/packdir/">packdir</a></strong> keeps
+directories of small files as SQLite archives (<code>.sqlar</code>).
+Under Turso’s MVCC its workers write one container at once, and
+<code>close</code> seals each container so stock
+<code>sqlite3 -Ax</code> still extracts it.</li>
+<li><strong><a href="https://firstpair.org/books/dng-compare/">DNG
+Compare</a></strong> keeps its preservation records
+(<code>recovery.sqlite3</code>), comparison caches and searchable
+metadata index in SQLite files. Its archives stay in WAL between runs,
+which is what <code>Keep_wal</code> and <code>Journal::Existing</code>
+are for, and it reads closed archives with <code>immutable</code>.</li>
+<li><strong>Mechanic</strong>, which builds Photo Mechanic catalogs from
+Lightroom previews, keeps its EXIF stub store in one SQLite file through
+it, from Rust and from OxCaml. It writes the store under Turso’s MVCC,
+one connection per thread or domain, and the finished store is served
+read-only with <code>immutable</code> by diskproxy, which is why sealing
+back to a rollback journal with no <code>-wal</code> beside it
+matters.</li>
+</ul>
+<p>A hub book for the FirstPair photo tools, in preparation, will show
+where these sit among them.</p>
+<h2 data-number="2.2" id="what-it-is-not"><span
+class="header-section-number">2.2</span> What it is not</h2>
+<p>tursolite is not an ORM, a migration tool or a server. It runs SQL
+you write, on a file you name. It does not hide which engine opened a
+file: <code>engine</code> says which one did, and a program that cares
+can ask.</p>
+</body>
+</html>

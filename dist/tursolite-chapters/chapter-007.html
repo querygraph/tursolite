@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>Connections, statements and transactions</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-008.html" accesskey="n" rel="next">Errors</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-006.html" accesskey="p" rel="previous">Opening a file</a>
+</span>
+</div>
+</nav>
+<h1 data-number="6" id="connections-statements-and-transactions"><span
+class="header-section-number">6</span> Connections, statements and
+transactions</h1>
+<h2 data-number="6.1" id="threads-and-domains"><span
+class="header-section-number">6.1</span> Threads and domains</h2>
+<p>A database is shared. A connection belongs to one thread (Rust,
+Python) or one domain (OCaml) at a time, and each takes its own from
+<code>connect</code>. The first <code>connect</code> hands out the
+connection that set the file up.</p>
+<p>Under MVCC every connection may write at once. Otherwise writers take
+turns, each waiting up to <code>busy_ms</code> for the one before.</p>
+<h2 data-number="6.2" id="transactions"><span
+class="header-section-number">6.2</span> Transactions</h2>
+<p><code>transaction</code> runs a function inside
+<code>BEGIN IMMEDIATE</code>, or <code>BEGIN CONCURRENT</code> under
+MVCC, and commits when it returns. Under MVCC a transaction that loses a
+conflict to another writer rolls back and runs again. <strong>The
+function must therefore be repeatable</strong>: it should compute what
+it writes from what it reads inside the transaction, not from state
+outside it that the first attempt changed.</p>
+<p>A row that every writer updates, such as a counter or a summary,
+belongs in a short transaction of its own, so that conflicts on it are
+cheap to retry.</p>
+<h2 data-number="6.3" id="statements-and-rows"><span
+class="header-section-number">6.3</span> Statements and rows</h2>
+<p><code>exec</code> runs SQL with no parameters, <code>run</code> one
+statement with parameters, and <code>query</code> returns rows as arrays
+of values in column order. The rest are conveniences over these:</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th></th>
+<th>Rust</th>
+<th>OCaml</th>
+<th>Python</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>All rows, with column names</td>
+<td><code>query_rows</code> (<code>Rows { columns, rows }</code>)</td>
+<td><code>query_rows</code> (<code>{ columns; rows }</code>),
+<code>column</code></td>
+<td><code>query_rows</code> (<code>Rows(columns, rows)</code>),
+<code>.column</code></td>
+</tr>
+<tr>
+<td>One row at a time</td>
+<td><code>for_each</code>, <code>query_map</code>, with
+<code>Row::named</code></td>
+<td><code>iter</code>, <code>fold</code></td>
+<td><code>rows</code>, <code>for_each</code></td>
+</tr>
+<tr>
+<td>The first row</td>
+<td><code>query_one</code></td>
+<td><code>query_one</code></td>
+<td><code>query_one</code></td>
+</tr>
+<tr>
+<td>A single value</td>
+<td><code>query_value::&lt;T&gt;</code></td>
+<td><code>query_value</code></td>
+<td><code>query_value</code></td>
+</tr>
+<tr>
+<td>The last rowid</td>
+<td><code>last_insert_rowid</code></td>
+<td><code>last_insert_rowid</code></td>
+<td><code>last_insert_rowid</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each connection prepares a statement once and reuses it: rusqlite’s
+and Turso’s caches in Rust, a per-connection cache over the opam
+<code>sqlite3</code> in OCaml, the standard module’s own cache in
+Python. The OCaml Turso C ABI and <code>pyturso</code> prepare a
+statement each time.</p>
+<h2 data-number="6.4" id="values"><span
+class="header-section-number">6.4</span> Values</h2>
+<p>A value is <code>Null</code>, <code>Integer</code> (64-bit),
+<code>Real</code>, <code>Text</code> or <code>Blob</code>, in every
+language. Rust converts with <code>From</code> and
+<code>FromValue</code> (including <code>Option&lt;T&gt;</code> for
+nullable columns) and <code>as_i64</code>, <code>as_f64</code>,
+<code>as_str</code>, <code>as_bytes</code>. OCaml has
+<code>as_int64</code>, <code>as_int</code>, <code>as_float</code>,
+<code>as_string</code>, <code>is_null</code> and <code>as_option</code>.
+Python uses <code>None</code>, <code>int</code>, <code>float</code>,
+<code>str</code> and <code>bytes</code>.</p>
+</body>
+</html>

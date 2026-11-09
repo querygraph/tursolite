@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov, with Claude as co-author" />
+  <meta name="dcterms.date" content="2026-11-09" />
+  <meta name="description" content="A short manual for firstpair-tursolite, one embedded SQL interface over SQLite and Turso with the same shape in Rust, OCaml, OxCaml and Python, which keeps every file it closes readable by stock SQLite." />
+  <title>Opening a file</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Tursolite</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Tursolite</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-007.html" accesskey="n" rel="next">Connections, statements and transactions</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-005.html" accesskey="p" rel="previous">Engines, journals and sealing</a>
+</span>
+</div>
+</nav>
+<h1 data-number="5" id="opening-a-file"><span
+class="header-section-number">5</span> Opening a file</h1>
+<h2 data-number="5.1" id="options"><span
+class="header-section-number">5.1</span> Options</h2>
+<p>Every option has a default, so a program names only what it
+changes:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>engine</code></td>
+<td><code>Sqlite</code></td>
+<td>which engine to ask for</td>
+</tr>
+<tr>
+<td><code>journal</code></td>
+<td><code>Delete</code></td>
+<td>see above</td>
+</tr>
+<tr>
+<td><code>page_size</code></td>
+<td>none</td>
+<td>set on a new file only</td>
+</tr>
+<tr>
+<td><code>auto_vacuum</code></td>
+<td>false</td>
+<td>incremental auto-vacuum on a new file; SQLite only</td>
+</tr>
+<tr>
+<td><code>read_only</code></td>
+<td>false</td>
+<td>open without writing</td>
+</tr>
+<tr>
+<td><code>immutable</code></td>
+<td>false</td>
+<td>SQLite’s <code>immutable=1</code> (below)</td>
+</tr>
+<tr>
+<td><code>create</code></td>
+<td>true</td>
+<td>create the file when missing</td>
+</tr>
+<tr>
+<td><code>busy_ms</code></td>
+<td>60000</td>
+<td>how long a writer waits for another to finish</td>
+</tr>
+<tr>
+<td><code>seal</code></td>
+<td><code>Standard</code></td>
+<td>what <code>close</code> leaves</td>
+</tr>
+<tr>
+<td><code>experimental</code></td>
+<td>none</td>
+<td>Turso’s experimental features (below)</td>
+</tr>
+</tbody>
+</table>
+<p>Options grow without breaking callers. Rust’s <code>Options</code> is
+<code>#[non_exhaustive]</code> and built from
+<code>Options::new()</code> with one method per field. OCaml and Python
+take every option by name with its default.</p>
+<h2 data-number="5.2" id="reading-without-writing"><span
+class="header-section-number">5.2</span> Reading without writing</h2>
+<p><code>read_only</code> opens a file without writing it.</p>
+<p><code>immutable</code> is SQLite’s <code>immutable=1</code>, for a
+file that nothing changes while it is open: no locks, no journal, and
+nothing written beside the file. It implies <code>read_only</code>,
+always uses SQLite, and refuses an unsealed MVCC file. It is the right
+way to read a closed archive on a volume another program may also be
+reading, because a plain read-only open of a WAL file still creates
+<code>-wal</code> and <code>-shm</code> files beside it.</p>
+<h2 data-number="5.3" id="choosing-an-engine"><span
+class="header-section-number">5.3</span> Choosing an engine</h2>
+<p><code>inspect</code> reads the first 100 bytes of a file and returns
+its header: page size, the two version bytes, and whether it has
+auto-vacuum. It returns nothing for a missing or empty file, and the
+error <code>Not_a_database</code> for anything that is not SQLite.</p>
+<p><code>resolve</code> decides which engine may open a file for what is
+wanted, and <code>open_database</code> applies it:</p>
+<ul>
+<li>A file in MVCC mode opens only with Turso, whatever was asked.</li>
+<li>A file with auto-vacuum is never written by Turso. Asked to read it
+with Turso, the library reads it with SQLite instead; asked to write it,
+it refuses.</li>
+<li>Otherwise the engine asked for is used, if this build links it.</li>
+</ul>
+</body>
+</html>
