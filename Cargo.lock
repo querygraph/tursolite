@@ -499,7 +499,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "firstpair-tursolite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pollster",
  "rusqlite",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "firstpair-tursolite-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "turso_sdk_kit",
 ]

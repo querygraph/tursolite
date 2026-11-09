@@ -1,6 +1,6 @@
 opam-version: "2.0"
 name: "firstpair-tursolite"
-version: "0.1.0"
+version: "0.2.0"
 synopsis: "One embedded SQL interface over SQLite and Turso"
 description: """
 SQLite through the sqlite3 package, and Turso with MVCC when

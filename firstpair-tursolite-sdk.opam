@@ -1,6 +1,6 @@
 opam-version: "2.0"
 name: "firstpair-tursolite-sdk"
-version: "0.1.0"
+version: "0.2.0"
 synopsis: "The Turso C ABI for OCaml, built from the pinned Rust crate"
 maintainer: "Alexy Khrabrov"
 authors: ["Alexy Khrabrov"]

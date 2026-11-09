@@ -27,6 +27,7 @@ let count ?(engine = Sqlite) p =
 
 let bytes p = In_channel.with_open_bin p In_channel.input_all
 let raises f = match f () with _ -> None | exception Failure m -> Some m
+let kind f = match f () with _ -> None | exception e -> Some (error_kind e)
 
 let () =
   List.iter (fun (n, j) ->
@@ -38,6 +39,34 @@ let () =
   let p = path "fallback.db" in
   write ~engine:Sqlite ~journal:Mvcc p 0 1;
   check ((Option.get (inspect p)).write_version = 1) "MVCC falls to a rollback journal";
+  (* Typed rows, iteration, cached statements, error kinds and immutable opens. *)
+  let p = path "typed x?#%.db" in
+  let db = open_database p in
+  let c = connect db in
+  exec c schema;
+  run c "INSERT INTO t VALUES (?, ?, ?)" [Text "a"; Integer 1L; Blob "\000\255"];
+  run c "INSERT INTO t VALUES (?, ?, ?)" [Text "b"; Null; Null];
+  check (last_insert_rowid c = 2L) "last_insert_rowid";
+  check (as_int (query_value c "SELECT count(*) FROM t" []) = 2) "query_value";
+  check (as_option as_int64 (query_value c "SELECT n FROM t WHERE name = 'b'" []) = None) "as_option";
+  check (as_string (query_value c "SELECT data FROM t WHERE name = ?" [Text "a"]) = "\000\255") "a blob";
+  check (query_one c "SELECT 1 FROM t WHERE name = 'z'" [] = None) "query_one";
+  check (fold c "SELECT name FROM t ORDER BY name" [] ~init:[] (fun acc r -> as_string r.(0) :: acc) = ["b"; "a"]) "fold";
+  let seen = ref 0 in
+  iter c "SELECT name FROM t" [] (fun _ ->
+    (* The same SQL while its statement is in use. *)
+    seen := !seen + List.length (query c "SELECT name FROM t" []));
+  check (!seen = 4) "iter, nested";
+  check (kind (fun () -> run c "INSERT INTO t VALUES ('a', 2, NULL)" []) = Some `Constraint) "a constraint";
+  disconnect c; close db;
+  let db = open_database ~immutable:true ~create:false p in
+  let c = connect db in
+  check (as_int (query_value c "SELECT count(*) FROM t" []) = 2) "immutable reads";
+  check (kind (fun () -> run c "DELETE FROM t" []) = Some `Read_only) "immutable refuses a write";
+  disconnect c; close db;
+  let junk = path "junk.db" in
+  Out_channel.with_open_bin junk (fun oc -> output_string oc (String.make 200 'x'));
+  check (kind (fun () -> open_database junk) = Some `Not_a_database) "not a database";
   let p = path "stock.sqlar" in
   write ~engine:Sqlite ~auto_vacuum:true p 0 2;
   check (Option.get (inspect p)).auto_vacuum "auto-vacuum set";
@@ -45,7 +74,7 @@ let () =
     let before = bytes p in
     List.iter (fun j ->
       match raises (fun () -> write ~engine:Turso ~journal:j p 2 3) with
-      | Some m -> check (String.length m > 0) m
+      | Some m -> check (error_kind (Failure m) = `Refused) m
       | None -> check false "Turso must refuse auto-vacuum") [Delete; Wal; Mvcc];
     check (count ~engine:Turso p = 2) "a read falls to SQLite";
     check (bytes p = before) "nothing asked of Turso touched the file";
@@ -76,6 +105,8 @@ let () =
     exec c "PRAGMA wal_checkpoint(TRUNCATE)";
     check (is_mvcc (Option.get (inspect p))) "in MVCC mode";
     check (resolve p Sqlite ~read_only:false = Turso) "an MVCC file resolves to Turso";
+    check (kind (fun () -> open_database ~immutable:true p) = Some `Refused) "no immutable open unsealed";
+    check (kind (fun () -> run c "INSERT INTO t VALUES ('a', 2, NULL)" []) = Some `Constraint) "a Turso constraint";
     disconnect c; close db;
     check (count p = 1) "sealed";
     (* Sealed only as far as WAL when asked: what dng-compare's archives do. *)

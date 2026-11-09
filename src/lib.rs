@@ -66,6 +66,8 @@ pub enum Seal {
     Wal,
 }
 
+/// How to open a file. Build it with `..Options::default()` so that a field
+/// added later does not break the caller.
 #[derive(Clone, Debug)]
 pub struct Options {
     pub engine: Engine,
@@ -75,6 +77,9 @@ pub struct Options {
     /// Incremental auto-vacuum on a new file; SQLite only.
     pub auto_vacuum: bool,
     pub read_only: bool,
+    /// SQLite's `immutable=1`: read-only, no locks and no journal, for a file
+    /// nothing changes while it is open. Implies `read_only`; always SQLite.
+    pub immutable: bool,
     pub create: bool,
     pub busy_ms: u64,
     pub seal: Seal,
@@ -88,6 +93,7 @@ impl Default for Options {
             page_size: None,
             auto_vacuum: false,
             read_only: false,
+            immutable: false,
             create: true,
             busy_ms: 60000,
             seal: Seal::Standard,
@@ -127,25 +133,182 @@ impl Value {
     pub fn as_str(&self) -> Result<String> {
         Ok(String::from_utf8_lossy(self.as_bytes()?).into_owned())
     }
+
+    /// A real, or an integer widened to one.
+    pub fn as_f64(&self) -> Result<f64> {
+        match self {
+            Value::Real(x) => Ok(*x),
+            Value::Integer(n) => Ok(*n as f64),
+            _ => Err(Error::new("expected a number".into())),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+
+    /// This value as a Rust type: see [FromValue].
+    pub fn get<T: FromValue>(&self) -> Result<T> {
+        T::from_value(self)
+    }
+}
+
+/// A Rust type a column value converts to. `Option<T>` takes `NULL` as `None`.
+pub trait FromValue: Sized {
+    fn from_value(v: &Value) -> Result<Self>;
+}
+
+impl FromValue for Value {
+    fn from_value(v: &Value) -> Result<Value> {
+        Ok(v.clone())
+    }
+}
+
+impl FromValue for i64 {
+    fn from_value(v: &Value) -> Result<i64> {
+        v.as_i64()
+    }
+}
+
+impl FromValue for f64 {
+    fn from_value(v: &Value) -> Result<f64> {
+        v.as_f64()
+    }
+}
+
+impl FromValue for bool {
+    fn from_value(v: &Value) -> Result<bool> {
+        Ok(v.as_i64()? != 0)
+    }
+}
+
+impl FromValue for String {
+    fn from_value(v: &Value) -> Result<String> {
+        v.as_str()
+    }
+}
+
+impl FromValue for Vec<u8> {
+    fn from_value(v: &Value) -> Result<Vec<u8>> {
+        Ok(v.as_bytes()?.to_vec())
+    }
+}
+
+impl<T: FromValue> FromValue for Option<T> {
+    fn from_value(v: &Value) -> Result<Option<T>> {
+        if v.is_null() { Ok(None) } else { T::from_value(v).map(Some) }
+    }
+}
+
+impl From<i64> for Value {
+    fn from(n: i64) -> Value {
+        Value::Integer(n)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(n: i32) -> Value {
+        Value::Integer(n.into())
+    }
+}
+
+impl From<bool> for Value {
+    fn from(b: bool) -> Value {
+        Value::Integer(b.into())
+    }
+}
+
+impl From<f64> for Value {
+    fn from(x: f64) -> Value {
+        Value::Real(x)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Value {
+        Value::text(s)
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Value {
+        Value::Text(s.into_bytes())
+    }
+}
+
+/// Bytes are a BLOB; text is made with [Value::text] or from a `&str`.
+impl From<Vec<u8>> for Value {
+    fn from(b: Vec<u8>) -> Value {
+        Value::Blob(b)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(b: &[u8]) -> Value {
+        Value::Blob(b.to_vec())
+    }
+}
+
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(v: Option<T>) -> Value {
+        v.map_or(Value::Null, Into::into)
+    }
+}
+
+/// What went wrong, for a caller to match on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// Busy, locked, or a concurrent transaction lost: roll back and retry.
+    Conflict,
+    /// A UNIQUE, NOT NULL, CHECK or foreign key constraint failed.
+    Constraint,
+    /// The file is not a database, or not one this engine can read.
+    NotADatabase,
+    /// A write through a read-only open.
+    ReadOnly,
+    /// One of the rules in the README refused the open.
+    Refused,
+    Other,
 }
 
 #[derive(Debug, Clone)]
 pub struct Error {
     pub message: String,
     /// A concurrent transaction lost; the caller may roll back and retry.
+    /// The same as `kind == ErrorKind::Conflict`.
     pub conflict: bool,
+    pub kind: ErrorKind,
 }
 
 impl Error {
     pub fn new(message: String) -> Error {
-        Error { message, conflict: false }
+        Error::of(ErrorKind::Other, message)
+    }
+
+    pub fn of(kind: ErrorKind, message: String) -> Error {
+        Error { message, conflict: kind == ErrorKind::Conflict, kind }
+    }
+
+    fn refused(path: &Path, message: &str) -> Error {
+        Error::of(ErrorKind::Refused, format!("{}: {message}", path.display()))
     }
 
     #[cfg(feature = "turso")]
-    fn engine(message: String) -> Error {
+    fn engine(e: turso::Error) -> Error {
+        let message = e.to_string();
         let lower = message.to_lowercase();
-        let conflict = lower.contains("conflict") || lower.contains("database is locked") || lower.contains("busy");
-        Error { message, conflict }
+        let kind = match e {
+            turso::Error::Busy(_) | turso::Error::BusySnapshot(_) => ErrorKind::Conflict,
+            turso::Error::Constraint(_) => ErrorKind::Constraint,
+            turso::Error::NotAdb(_) => ErrorKind::NotADatabase,
+            turso::Error::Readonly(_) => ErrorKind::ReadOnly,
+            _ if lower.contains("conflict") || lower.contains("database is locked") || lower.contains("busy") => {
+                ErrorKind::Conflict
+            }
+            _ => ErrorKind::Other,
+        };
+        Error::of(kind, message)
     }
 }
 
@@ -194,7 +357,7 @@ pub fn inspect(path: &Path) -> Result<Option<Header>> {
         return Ok(None);
     }
     if got < 100 || &b[..16] != b"SQLite format 3\0" {
-        return Err(Error::new(format!("{}: not a database", path.display())));
+        return Err(Error::of(ErrorKind::NotADatabase, format!("{}: not a database", path.display())));
     }
     let raw = u16::from_be_bytes([b[16], b[17]]) as u32;
     Ok(Some(Header {
@@ -210,12 +373,11 @@ pub fn inspect(path: &Path) -> Result<Option<Header>> {
 /// honoured when it can be: a file Turso may not write falls to SQLite for
 /// reading, an MVCC file to Turso always.
 pub fn resolve(path: &Path, want: Engine, read_only: bool) -> Result<Engine> {
-    let refused = |m: String| Err(Error::new(format!("{}: {m}", path.display())));
     let usable = |e: Engine| {
         if e.available() {
             Ok(e)
         } else {
-            Err(Error::new(format!("{}: needs {}, which this build does not link", path.display(), e.name())))
+            Err(Error::refused(path, &format!("needs {}, which this build does not link", e.name())))
         }
     };
     match inspect(path)? {
@@ -224,7 +386,7 @@ pub fn resolve(path: &Path, want: Engine, read_only: bool) -> Result<Engine> {
             if read_only {
                 usable(Engine::Sqlite)
             } else {
-                refused("has auto-vacuum, which Turso cannot write safely; rebuild it without".into())
+                Err(Error::refused(path, "has auto-vacuum, which Turso cannot write safely; rebuild it without"))
             }
         }
         _ => usable(want),
@@ -233,10 +395,10 @@ pub fn resolve(path: &Path, want: Engine, read_only: bool) -> Result<Engine> {
 
 fn check_options(path: &Path, o: &Options) -> Result<()> {
     if o.journal == Journal::Mvcc && o.engine != Engine::Turso {
-        return Err(Error::new(format!("{}: MVCC needs the turso engine", path.display())));
+        return Err(Error::refused(path, "MVCC needs the turso engine"));
     }
     if o.auto_vacuum && o.engine == Engine::Turso {
-        return Err(Error::new(format!("{}: Turso cannot write auto-vacuum", path.display())));
+        return Err(Error::refused(path, "Turso cannot write auto-vacuum"));
     }
     Ok(())
 }
@@ -280,6 +442,13 @@ impl Database {
         if existing.is_none() && !o.create {
             return Err(Error::new(format!("{}: no such database", path.display())));
         }
+        if o.immutable {
+            if existing.is_some_and(|h| h.mvcc()) {
+                return Err(Error::refused(path, "is unsealed (MVCC); open it with Turso and close it before reading it immutably"));
+            }
+            o.read_only = true;
+            o.engine = Engine::Sqlite;
+        }
         o.engine = resolve(path, o.engine, o.read_only)?;
         if o.journal == Journal::Mvcc && o.engine != Engine::Turso {
             o.journal = Journal::Delete;
@@ -296,7 +465,10 @@ impl Database {
                 if o.read_only {
                     b = b.read_only(true);
                 }
-                Backend::Turso(pollster::block_on(b.build()).map_err(|e| Error::engine(format!("{}: {e}", path.display())))?)
+                Backend::Turso(pollster::block_on(b.build()).map_err(|e| {
+                    let e = Error::engine(e);
+                    Error::of(e.kind, format!("{}: {}", path.display(), e.message))
+                })?)
             }
             #[allow(unreachable_patterns)]
             e => return Err(Error::new(format!("{} is not linked", e.name()))),
@@ -349,12 +521,15 @@ impl Database {
         let inner = match &self.backend {
             #[cfg(feature = "sqlite")]
             Backend::Sqlite => {
-                let flags = if self.options.read_only {
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                use rusqlite::OpenFlags as F;
+                let c = if self.options.immutable {
+                    rusqlite::Connection::open_with_flags(immutable_uri(&self.path), F::SQLITE_OPEN_READ_ONLY | F::SQLITE_OPEN_URI)
+                } else if self.options.read_only {
+                    rusqlite::Connection::open_with_flags(&self.path, F::SQLITE_OPEN_READ_ONLY)
                 } else {
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-                };
-                let c = rusqlite::Connection::open_with_flags(&self.path, flags).map_err(sqlite_error)?;
+                    rusqlite::Connection::open_with_flags(&self.path, F::SQLITE_OPEN_READ_WRITE | F::SQLITE_OPEN_CREATE)
+                }
+                .map_err(sqlite_error)?;
                 c.busy_timeout(std::time::Duration::from_millis(self.options.busy_ms)).map_err(sqlite_error)?;
                 // The bundled SQLite turns these on by default; the sqlite3 of
                 // the OCaml build and Turso do not. One rule for all of them.
@@ -363,9 +538,8 @@ impl Database {
             }
             #[cfg(feature = "turso")]
             Backend::Turso(db) => {
-                let c = db.connect().map_err(|e| Error::engine(e.to_string()))?;
-                c.busy_timeout(std::time::Duration::from_millis(self.options.busy_ms))
-                    .map_err(|e| Error::engine(e.to_string()))?;
+                let c = db.connect().map_err(Error::engine)?;
+                c.busy_timeout(std::time::Duration::from_millis(self.options.busy_ms)).map_err(Error::engine)?;
                 ConnectionInner::Turso(c)
             }
         };
@@ -425,11 +599,30 @@ fn standard(path: &Path) -> Result<()> {
 
 #[cfg(feature = "sqlite")]
 fn sqlite_error(e: rusqlite::Error) -> Error {
-    let conflict = matches!(
-        e.sqlite_error_code(),
-        Some(rusqlite::ErrorCode::DatabaseBusy) | Some(rusqlite::ErrorCode::DatabaseLocked)
-    );
-    Error { message: e.to_string(), conflict }
+    use rusqlite::ErrorCode as C;
+    let kind = match e.sqlite_error_code() {
+        Some(C::DatabaseBusy | C::DatabaseLocked) => ErrorKind::Conflict,
+        Some(C::ConstraintViolation) => ErrorKind::Constraint,
+        Some(C::NotADatabase) => ErrorKind::NotADatabase,
+        Some(C::ReadOnly) => ErrorKind::ReadOnly,
+        _ => ErrorKind::Other,
+    };
+    Error::of(kind, e.to_string())
+}
+
+/// `file:` URI of [path] with `immutable=1`, its reserved characters escaped.
+#[cfg(feature = "sqlite")]
+fn immutable_uri(path: &Path) -> String {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut uri = String::from("file:");
+    for &b in path.to_string_lossy().as_bytes() {
+        match b {
+            b'?' | b'#' | b'%' | 0x80.. => uri.push_str(&format!("%{b:02X}")),
+            _ => uri.push(b as char),
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
 }
 
 #[cfg(feature = "sqlite")]
@@ -444,17 +637,20 @@ fn to_sqlite(v: &Value) -> rusqlite::types::ToSqlOutput<'_> {
     })
 }
 
+/// A row handed to a callback: the columns of one result row, in order.
+pub type Row<'a> = &'a [Value];
+
 #[cfg(feature = "sqlite")]
-fn sqlite_query(c: &rusqlite::Connection, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>> {
+fn sqlite_each(c: &rusqlite::Connection, sql: &str, params: &[Value], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<()> {
     let mut st = c.prepare_cached(sql).map_err(sqlite_error)?;
     for (i, p) in params.iter().enumerate() {
         st.raw_bind_parameter(i + 1, to_sqlite(p)).map_err(sqlite_error)?;
     }
     let n = st.column_count();
     let mut rows = st.raw_query();
-    let mut out = Vec::new();
+    let mut row = Vec::with_capacity(n);
     while let Some(r) = rows.next().map_err(sqlite_error)? {
-        let mut row = Vec::with_capacity(n);
+        row.clear();
         for i in 0..n {
             use rusqlite::types::ValueRef;
             row.push(match r.get_ref(i).map_err(sqlite_error)? {
@@ -465,9 +661,9 @@ fn sqlite_query(c: &rusqlite::Connection, sql: &str, params: &[Value]) -> Result
                 ValueRef::Blob(b) => Value::Blob(b.to_vec()),
             });
         }
-        out.push(row);
+        f(&row)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(feature = "turso")]
@@ -484,15 +680,16 @@ fn to_turso(v: &Value) -> Result<turso::Value> {
 }
 
 #[cfg(feature = "turso")]
-fn turso_query(c: &turso::Connection, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>> {
+fn turso_each(c: &turso::Connection, sql: &str, params: &[Value], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<()> {
     let values = params.iter().map(to_turso).collect::<Result<Vec<_>>>()?;
     pollster::block_on(async {
-        let mut rows = c.query(sql, values).await.map_err(|e| Error::engine(e.to_string()))?;
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await.map_err(|e| Error::engine(e.to_string()))? {
-            let mut row = Vec::with_capacity(r.column_count());
+        let mut st = c.prepare_cached(sql).await.map_err(Error::engine)?;
+        let mut rows = st.query(values).await.map_err(Error::engine)?;
+        let mut row = Vec::new();
+        while let Some(r) = rows.next().await.map_err(Error::engine)? {
+            row.clear();
             for i in 0..r.column_count() {
-                row.push(match r.get_value(i).map_err(|e| Error::engine(e.to_string()))? {
+                row.push(match r.get_value(i).map_err(Error::engine)? {
                     turso::Value::Null => Value::Null,
                     turso::Value::Integer(n) => Value::Integer(n),
                     turso::Value::Real(x) => Value::Real(x),
@@ -500,21 +697,54 @@ fn turso_query(c: &turso::Connection, sql: &str, params: &[Value]) -> Result<Vec
                     turso::Value::Blob(b) => Value::Blob(b),
                 });
             }
-            out.push(row);
+            f(&row)?;
         }
-        Ok(out)
+        Ok(())
     })
 }
 
 impl Connection {
-    /// Runs one statement and returns its rows.
-    pub fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>> {
+    /// Runs one statement, calling `f` on each row as it is read. The
+    /// statement is prepared once per connection and cached.
+    pub fn for_each(&self, sql: &str, params: &[Value], mut f: impl FnMut(Row) -> Result<()>) -> Result<()> {
         match &self.inner {
             #[cfg(feature = "sqlite")]
-            ConnectionInner::Sqlite(c) => sqlite_query(c, sql, params),
+            ConnectionInner::Sqlite(c) => sqlite_each(c, sql, params, &mut f),
             #[cfg(feature = "turso")]
-            ConnectionInner::Turso(c) => turso_query(c, sql, params),
+            ConnectionInner::Turso(c) => turso_each(c, sql, params, &mut f),
         }
+    }
+
+    /// Runs one statement and returns its rows.
+    pub fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>> {
+        self.query_map(sql, params, |r| Ok(r.to_vec()))
+    }
+
+    /// Runs one statement and returns `f` of each row.
+    pub fn query_map<T>(&self, sql: &str, params: &[Value], mut f: impl FnMut(Row) -> Result<T>) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        self.for_each(sql, params, |r| {
+            out.push(f(r)?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// The first row, if there is one.
+    pub fn query_one(&self, sql: &str, params: &[Value]) -> Result<Option<Vec<Value>>> {
+        Ok(self.query(sql, params)?.into_iter().next())
+    }
+
+    /// The one value of a one-row, one-column result, as a Rust type.
+    pub fn query_value<T: FromValue>(&self, sql: &str, params: &[Value]) -> Result<T> {
+        match self.query(sql, params)?.as_slice() {
+            [row] if row.len() == 1 => T::from_value(&row[0]),
+            rows => Err(Error::new(format!("expected one value from {sql:?}, got {} rows", rows.len()))),
+        }
+    }
+
+    pub fn last_insert_rowid(&self) -> Result<i64> {
+        self.query_value("SELECT last_insert_rowid()", &[])
     }
 
     pub fn run(&self, sql: &str, params: &[Value]) -> Result<()> {
@@ -528,10 +758,10 @@ impl Connection {
             ConnectionInner::Sqlite(c) => c.execute_batch(sql).map_err(sqlite_error),
             #[cfg(feature = "turso")]
             // Turso's batch refuses a statement that returns rows, as pragmas do.
-            ConnectionInner::Turso(c) if !sql.contains(';') => turso_query(c, sql, &[]).map(|_| ()),
+            ConnectionInner::Turso(c) if !sql.contains(';') => turso_each(c, sql, &[], &mut |_| Ok(())),
             #[cfg(feature = "turso")]
             ConnectionInner::Turso(c) => {
-                pollster::block_on(c.execute_batch(sql)).map_err(|e| Error::engine(e.to_string()))
+                pollster::block_on(c.execute_batch(sql)).map_err(Error::engine)
             }
         }
     }

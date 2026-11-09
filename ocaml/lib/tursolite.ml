@@ -18,6 +18,8 @@ type journal = Delete | Wal | Mvcc | Existing
 type seal = Standard | Sealed_wal
 type value = Types.value = Null | Integer of int64 | Real of float | Text of string | Blob of string
 
+(* Busy, locked, or a concurrent transaction lost: roll back and retry.
+   Every other failure is [Failure]; [error_kind] says what it was. *)
 exception Conflict of string
 
 let engine_name = function Sqlite -> "sqlite" | Turso -> "turso"
@@ -25,6 +27,12 @@ let parse_engine = function
   | "sqlite" -> Sqlite | "turso" -> Turso | e -> failwith ("unknown engine " ^ e)
 let available = function Sqlite -> true | Turso -> Turso_backend.available
 let turso_version = Turso_backend.version
+
+(* The refusals of the rules in the README; [error_kind] knows them. *)
+let refused_auto_vacuum = "has auto-vacuum, which Turso cannot write safely; rebuild it without"
+let refused_link = "which this build does not link"
+let refused_turso_vacuum = "Turso cannot write auto-vacuum"
+let refused_immutable = "is unsealed (MVCC); open it with Turso and close it before reading it immutably"
 
 type header = { page_size : int; write_version : int; read_version : int; auto_vacuum : bool }
 
@@ -53,12 +61,12 @@ let is_mvcc h = h.write_version = 255 && h.read_version = 255
 let resolve path want ~read_only =
   let usable e =
     if available e then e
-    else failwith (path ^ ": needs " ^ engine_name e ^ ", which this build does not link") in
+    else failwith (path ^ ": needs " ^ engine_name e ^ ", " ^ refused_link) in
   match inspect path with
   | Some h when is_mvcc h -> usable Turso
   | Some h when h.auto_vacuum && want = Turso ->
       if read_only then usable Sqlite
-      else failwith (path ^ ": has auto-vacuum, which Turso cannot write safely; rebuild it without")
+      else failwith (path ^ ": " ^ refused_auto_vacuum)
   | _ -> usable want
 
 type backend = S | T of Turso_backend.database
@@ -66,13 +74,18 @@ type backend = S | T of Turso_backend.database
 type database = {
   backend : backend; path : string; journal : journal; read_only : bool; busy_ms : int; seal : seal;
   mvcc : bool; (* in MVCC mode now, whatever was asked for: an unsealed file *)
+  immutable : bool;
   lock : Mutex.t;
   (* The connection that set up the file. A new file's page size and vacuum
      mode belong to it, so it is the first handed out. *)
   mutable first : connection option;
 }
 
-and connection = { inner : inner; conn_mvcc : bool }
+and connection = {
+  inner : inner; conn_mvcc : bool;
+  (* SQLite statements prepared once per connection, by their SQL. *)
+  cache : (string, Sqlite3.stmt) Hashtbl.t;
+}
 and inner = Sq of Sqlite3.db | Tu of Turso_backend.connection
 
 let engine db = match db.backend with S -> Sqlite | T _ -> Turso
@@ -99,22 +112,93 @@ let of_data = function
   | Sqlite3.Data.NULL | Sqlite3.Data.NONE -> Null | Sqlite3.Data.INT n -> Integer n
   | Sqlite3.Data.FLOAT x -> Real x | Sqlite3.Data.TEXT s -> Text s | Sqlite3.Data.BLOB s -> Blob s
 
-let sqlite_query db sql params =
-  let st = Sqlite3.prepare db sql in
-  Fun.protect ~finally:(fun () -> ignore (Sqlite3.finalize st)) (fun () ->
+let prepare db sql =
+  try Sqlite3.prepare db sql
+  with Sqlite3.SqliteError m | Sqlite3.Error m -> failwith (Printf.sprintf "%s: %s (%s)" sql m (Sqlite3.errmsg db))
+
+(* [f] on each row of [sql], a statement taken from [cache] when it has one
+   and put back reset, or prepared and finalized when [cache] is None. A
+   statement in use is out of the cache, so [f] may run the same SQL. *)
+let sqlite_iter ?cache db sql params f =
+  let st = match cache with
+    | Some h -> (match Hashtbl.find_opt h sql with
+                 | Some st -> Hashtbl.remove h sql; st
+                 | None -> prepare db sql)
+    | None -> prepare db sql in
+  let finally () = match cache with
+    | Some h when not (Hashtbl.mem h sql) ->
+        ignore (Sqlite3.reset st); ignore (Sqlite3.clear_bindings st); Hashtbl.replace h sql st
+    | _ -> ignore (Sqlite3.finalize st) in
+  Fun.protect ~finally (fun () ->
     List.iteri (fun i p -> check_sqlite db "bind" (Sqlite3.bind st (i + 1) (to_data p))) params;
-    let rec rows acc = match Sqlite3.step st with
-      | Sqlite3.Rc.ROW -> rows (Array.map of_data (Sqlite3.row_data st) :: acc)
-      | Sqlite3.Rc.DONE -> List.rev acc
-      | rc -> check_sqlite db sql rc; List.rev acc in
-    rows [])
+    let rec rows () = match Sqlite3.step st with
+      | Sqlite3.Rc.ROW -> f (Array.map of_data (Sqlite3.row_data st)); rows ()
+      | Sqlite3.Rc.DONE -> ()
+      | rc -> check_sqlite db sql rc in
+    rows ())
+
+let sqlite_query ?cache db sql params =
+  let acc = ref [] in
+  sqlite_iter ?cache db sql params (fun r -> acc := r :: !acc);
+  List.rev !acc
+
+let turso_query t sql params =
+  try Turso_backend.execute t sql (Array.of_list params)
+  with Failure m when conflict_message m -> raise (Conflict m)
+
+(* Runs one statement, calling [f] on each row. SQLite hands rows over as it
+   reads them; Turso reads them all first. Statements are cached per
+   connection on SQLite; the Turso C ABI prepares each time. *)
+let iter c sql params f = match c.inner with
+  | Sq db -> sqlite_iter ~cache:c.cache db sql params f
+  | Tu t -> List.iter f (turso_query t sql params)
+
+let fold c sql params ~init f =
+  let acc = ref init in
+  iter c sql params (fun r -> acc := f !acc r);
+  !acc
 
 (* Runs one statement and returns its rows. *)
 let query c sql params = match c.inner with
-  | Sq db -> sqlite_query db sql params
-  | Tu t ->
-      (try Turso_backend.execute t sql (Array.of_list params)
-       with Failure m when conflict_message m -> raise (Conflict m))
+  | Sq db -> sqlite_query ~cache:c.cache db sql params
+  | Tu t -> turso_query t sql params
+
+(* The first row, if there is one. *)
+let query_one c sql params = match query c sql params with r :: _ -> Some r | [] -> None
+
+(* The one value of a one-row, one-column result. *)
+let query_value c sql params = match query c sql params with
+  | [ [| v |] ] -> v
+  | rows -> failwith (Printf.sprintf "expected one value from %S, got %d rows" sql (List.length rows))
+
+let is_null = function Null -> true | _ -> false
+let as_int64 = function Integer n -> n | _ -> failwith "expected an integer"
+let as_int v = Int64.to_int (as_int64 v)
+(* A real, or an integer widened to one. *)
+let as_float = function Real x -> x | Integer n -> Int64.to_float n | _ -> failwith "expected a number"
+(* Text or a blob's bytes. *)
+let as_string = function Text s | Blob s -> s | _ -> failwith "expected text"
+let as_option f = function Null -> None | v -> Some (f v)
+
+type error_kind = [ `Conflict | `Constraint | `Not_a_database | `Read_only | `Refused | `Other ]
+
+(* What an exception raised here was, for a caller to match on. *)
+let error_kind : exn -> error_kind =
+  let has m k =
+    let n = String.length k in
+    let rec go i = i + n <= String.length m && (String.sub m i n = k || go (i + 1)) in
+    go 0 in
+  function
+  | Conflict _ -> `Conflict
+  | Failure m ->
+      let any = List.exists (has m) in
+      if any ["(CONSTRAINT"; "Turso status 129:"; "constraint failed"] then `Constraint
+      else if any ["(NOTADB"; "Turso status 132:"; "not a database"] then `Not_a_database
+      else if any ["(READONLY"; "Turso status 130:"; "readonly"] then `Read_only
+      else if any [refused_auto_vacuum; refused_link; refused_turso_vacuum; refused_immutable]
+      then `Refused
+      else `Other
+  | _ -> `Other
 
 let run c sql params = ignore (query c sql params)
 
@@ -125,14 +209,30 @@ let exec c sql = match c.inner with
       List.iter (fun s -> if String.trim s <> "" then run c (String.trim s) [])
         (String.split_on_char ';' sql)
 
+(* A [file:] URI of [path] with immutable=1, its reserved bytes escaped. *)
+let immutable_uri path =
+  let path = if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path else path in
+  let b = Buffer.create (String.length path + 20) in
+  Buffer.add_string b "file:";
+  String.iter (fun ch -> match ch with
+    | '?' | '#' | '%' | '\128' .. '\255' -> Buffer.add_string b (Printf.sprintf "%%%02X" (Char.code ch))
+    | ch -> Buffer.add_char b ch) path;
+  Buffer.add_string b "?immutable=1";
+  Buffer.contents b
+
 let open_connection db =
   let inner = match db.backend with
     | S ->
-        let d = if db.read_only then Sqlite3.db_open ~mode:`READONLY db.path else Sqlite3.db_open db.path in
+        let d =
+          if db.immutable then Sqlite3.db_open ~mode:`READONLY ~uri:true (immutable_uri db.path)
+          else if db.read_only then Sqlite3.db_open ~mode:`READONLY db.path
+          else Sqlite3.db_open db.path in
         Sqlite3.busy_timeout d db.busy_ms;
+        (* The bundled SQLite of the Rust build turns these on; one rule for all. *)
+        check_sqlite d "foreign_keys" (Sqlite3.exec d "PRAGMA foreign_keys = OFF");
         Sq d
     | T t -> Tu (Turso_backend.connect t db.busy_ms) in
-  { inner; conn_mvcc = db.mvcc }
+  { inner; conn_mvcc = db.mvcc; cache = Hashtbl.create 8 }
 
 (* A connection of its own for one thread. Only MVCC lets several write. *)
 let connect db =
@@ -145,23 +245,31 @@ let last_insert_rowid c = match query c "SELECT last_insert_rowid()" [] with
   | [ [| Integer n |] ] -> n | _ -> failwith "no last_insert_rowid"
 
 let disconnect c = match c.inner with
-  | Sq d -> ignore (Sqlite3.db_close d)
+  | Sq d ->
+      Hashtbl.iter (fun _ st -> ignore (Sqlite3.finalize st)) c.cache;
+      Hashtbl.reset c.cache;
+      ignore (Sqlite3.db_close d)
   | Tu t -> Turso_backend.close_connection t
 
 (* Opens [path]. The engine actually used is [engine db]: see [resolve] for
    when it differs from the one asked for. *)
 let open_database ?(engine = Sqlite) ?(journal = Delete) ?page_size ?(auto_vacuum = false)
-    ?(read_only = false) ?(create = true) ?(busy_ms = 60000) ?(seal = Standard) path =
+    ?(read_only = false) ?(immutable = false) ?(create = true) ?(busy_ms = 60000) ?(seal = Standard) path =
   let existing = inspect path in
   if existing = None && not create then failwith (path ^ ": no such database");
+  if immutable && (match existing with Some h -> is_mvcc h | None -> false) then
+    failwith (path ^ ": " ^ refused_immutable);
+  let read_only = read_only || immutable in
+  let engine = if immutable then Sqlite else engine in
   let engine = resolve path engine ~read_only in
   let journal = if journal = Mvcc && engine <> Turso then Delete else journal in
-  if auto_vacuum && engine = Turso then failwith (path ^ ": Turso cannot write auto-vacuum");
+  if auto_vacuum && engine = Turso then failwith (path ^ ": " ^ refused_turso_vacuum);
   let fresh = existing = None in
   let mvcc = journal = Mvcc || (match existing with Some h -> is_mvcc h | None -> false) in
   let backend = match engine with
     | Sqlite -> S | Turso -> T (Turso_backend.open_database path read_only) in
-  let db = { backend; path; journal; read_only; busy_ms; seal; mvcc; lock = Mutex.create (); first = None } in
+  let db = { backend; path; journal; read_only; busy_ms; seal; mvcc; immutable;
+             lock = Mutex.create (); first = None } in
   let c = open_connection db in
   if not read_only then begin
     if fresh then begin

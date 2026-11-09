@@ -1,5 +1,5 @@
 //! Every engine and journal, the files they leave, and the guards between them.
-use firstpair_tursolite::{Engine, Journal, Options, Result, Seal, Value, inspect, resolve};
+use firstpair_tursolite::{Engine, ErrorKind, Journal, Options, Result, Seal, Value, inspect, resolve};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -67,6 +67,46 @@ fn foreign_keys_stay_off() {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn typed_rows_and_errors() {
+    let d = temp("typed");
+    let p = d.join("x y?#%.db");
+    let db = Database::open(&p, &Options::default()).unwrap();
+    let c = db.connect().unwrap();
+    c.exec(SCHEMA).unwrap();
+    c.run("INSERT INTO t VALUES (?, ?, ?)", &["a".into(), 1i64.into(), vec![0u8, 255].into()]).unwrap();
+    c.run("INSERT INTO t VALUES (?, ?, ?)", &["b".into(), Value::from(None::<i64>), Value::Null]).unwrap();
+    assert_eq!(c.last_insert_rowid().unwrap(), 2);
+    assert_eq!(c.query_value::<i64>("SELECT count(*) FROM t", &[]).unwrap(), 2);
+    assert_eq!(c.query_value::<Option<i64>>("SELECT n FROM t WHERE name = 'b'", &[]).unwrap(), None);
+    assert_eq!(c.query_value::<Vec<u8>>("SELECT data FROM t WHERE name = 'a'", &[]).unwrap(), vec![0, 255]);
+    assert!(c.query_one("SELECT 1 FROM t WHERE name = 'z'", &[]).unwrap().is_none());
+    let names = c.query_map("SELECT name FROM t ORDER BY name", &[], |r| r[0].get::<String>()).unwrap();
+    assert_eq!(names, ["a", "b"]);
+    let mut seen = 0;
+    c.for_each("SELECT n FROM t", &[], |_| {
+        seen += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, 2);
+    let e = c.run("INSERT INTO t VALUES ('a', 2, NULL)", &[]).unwrap_err();
+    assert_eq!((e.kind, e.conflict), (ErrorKind::Constraint, false), "{e}");
+    drop(c);
+    db.close().unwrap();
+    let o = Options { immutable: true, create: false, ..Options::default() };
+    let db = Database::open(&p, &o).unwrap();
+    let c = db.connect().unwrap();
+    assert_eq!(c.query_value::<i64>("SELECT count(*) FROM t", &[]).unwrap(), 2);
+    assert_eq!(c.run("DELETE FROM t", &[]).unwrap_err().kind, ErrorKind::ReadOnly);
+    drop(c);
+    db.close().unwrap();
+    let junk = d.join("junk.db");
+    std::fs::write(&junk, [7u8; 200]).unwrap();
+    assert_eq!(Database::open(&junk, &Options::default()).err().unwrap().kind, ErrorKind::NotADatabase);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn mvcc_needs_turso() {
     let d = temp("mvcc-needs");
     let p = d.join("x.db");
@@ -108,7 +148,7 @@ mod both {
         assert!(inspect(&p).unwrap().unwrap().auto_vacuum);
         for j in [Journal::Delete, Journal::Wal, Journal::Mvcc] {
             let e = write(&p, &options(Engine::Turso, j), 2..3).err().expect("Turso must refuse");
-            assert!(e.message.contains("auto-vacuum"), "{e}");
+            assert!(e.message.contains("auto-vacuum") && e.kind == ErrorKind::Refused, "{e}");
         }
         assert_eq!(resolve(&p, Engine::Turso, true).unwrap(), Engine::Sqlite);
         assert_eq!(count(&p, Engine::Turso).unwrap(), 2, "a read falls to SQLite");
@@ -139,6 +179,8 @@ mod both {
         drop(db); // a crash, in effect: never sealed
         assert!(inspect(&p).unwrap().unwrap().mvcc());
         assert_eq!(resolve(&p, Engine::Sqlite, false).unwrap(), Engine::Turso);
+        let immutable = Options { immutable: true, ..Options::default() };
+        assert_eq!(Database::open(&p, &immutable).err().unwrap().kind, ErrorKind::Refused);
         let db = Database::open(&p, &options(Engine::Sqlite, Journal::Delete)).unwrap();
         assert_eq!(db.engine(), Engine::Turso);
         assert!(db.mvcc());
@@ -196,4 +238,23 @@ mod both {
         Arc::into_inner(db).unwrap().close().unwrap();
         assert_eq!(count(&p, Engine::Sqlite).unwrap(), 200);
     }
+}
+
+/// The other half of python/tests/test_matrix.py's cross-language check: a
+/// file Python's Turso path wrote and sealed, read by this crate's SQLite.
+#[cfg(feature = "sqlite")]
+#[test]
+fn reads_a_file_python_sealed() {
+    let Ok(path) = std::env::var("TURSOLITE_PYTHON_FILE") else { return };
+    let rows: i64 = std::env::var("TURSOLITE_PYTHON_ROWS").unwrap().parse().unwrap();
+    let p = PathBuf::from(path);
+    let h = inspect(&p).unwrap().unwrap();
+    assert!(!h.mvcc() && h.write_version == 1, "sealed to a rollback journal: {h:?}");
+    assert_eq!(resolve(&p, Engine::Sqlite, true).unwrap(), Engine::Sqlite);
+    let db = Database::open(&p, &Options { read_only: true, create: false, ..Options::default() }).unwrap();
+    let c = db.connect().unwrap();
+    assert_eq!(c.query("PRAGMA integrity_check", &[]).unwrap()[0][0], Value::text("ok"));
+    assert_eq!(c.query("SELECT count(*) FROM t", &[]).unwrap()[0][0].as_i64().unwrap(), rows);
+    drop(c);
+    db.close().unwrap();
 }
