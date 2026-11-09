@@ -1,5 +1,5 @@
-title: tursolite
-subtitle: One embedded SQL interface over SQLite and Turso, in Rust, OCaml, OxCaml and Python
+title: Tursolite
+subtitle: A Rust, OCaml, OxCaml and Python library for parallel SQLite-compatible databases
 author: Alexy Khrabrov, with Claude as co-author
 language: en-US
 lang: en-US

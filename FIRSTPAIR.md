@@ -13,7 +13,7 @@ The manual is by Alexy Khrabrov with Claude as co-author. The code is Apache 2.0
 Turso's C header, `ocaml/sdk/turso.h`, is MIT.
 
 `cover/tursolite-cover.png` is the book cover and `cover/tursolite-headboard.png`,
-without text, is the shelf headboard; both are the user's art.
+which carries the title, is the shelf and blog headboard; both are the user's art.
 
 ```sh
 PATH=/usr/local/bin:$PATH ~/src/firstpair/publishing/scripts/build-library-book.sh --repo-root ~/src/tursolite
