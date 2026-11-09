@@ -116,6 +116,49 @@ the library keeps the file one that both engines, and stock
 <code>sqlite3</code>, can read when it is closed.</p>
 <h2 data-number="2.1" id="where-it-fits"><span
 class="header-section-number">2.1</span> Where it fits</h2>
+<p>This book is one of nine on the FirstPair photo tools. Each owns one
+part, and <a href="https://firstpair.org/books/photostack/">The
+FirstPair Photo Stack</a> shows how they fit together.</p>
+<ul>
+<li><strong><a
+href="https://firstpair.org/books/tiffgraph/">tiffgraph</a></strong>
+walks a TIFF or DNG file’s structure under a fixed grammar and finds its
+editable XMP packet.</li>
+<li><strong><a
+href="https://firstpair.org/books/phidentify/">phidentify</a></strong>
+computes a photo’s identities: SHA-256, DNG raw blocks, image data,
+Lightroom fingerprint, metadata record and preserved digest.</li>
+<li><strong><a
+href="https://firstpair.org/books/phindex/">phindex</a></strong> keeps
+those identities for every file of a volume, and aligns two volumes by
+content.</li>
+<li><strong><a href="https://firstpair.org/books/dng-compare/">DNG
+Compare</a></strong> compares pairs and preserves one side byte for byte
+as deltas against the other, with a searchable metadata section, through
+<code>dngc</code>.</li>
+<li><strong><a
+href="https://firstpair.org/books/semantic-unison/">Semantic
+Unison</a></strong> synchronizes photo trees, sending metadata edits
+without resending image bytes, and preserves what a shuttle disk brings
+into the same archives.</li>
+<li><strong><a
+href="https://firstpair.org/books/packdir/">packdir</a></strong> keeps
+directories of small files as SQLite archives that still work like plain
+files.</li>
+<li><strong><a
+href="https://firstpair.org/books/tursolite/">Tursolite</a></strong> is
+the SQLite and Turso layer under packdir, DNG Compare and Mechanic.</li>
+<li><strong><a
+href="https://firstpair.org/books/diskproxy/">diskproxy</a></strong>
+serves a folder as a virtual disk, such as previews with camera metadata
+spliced in, and captures ratings into sidecars.</li>
+<li><strong><a
+href="https://firstpair.org/books/lightroom-repair/">Lightroom
+Repair</a></strong> repairs Lightroom Classic catalogs, previews and
+Sync without forging their state.</li>
+</ul>
+<h3 data-number="2.1.1" id="who-uses-it"><span
+class="header-section-number">2.1.1</span> Who uses it</h3>
 <p>tursolite is the database layer under three FirstPair projects. Each
 uses it for files that must outlive the program that wrote them:</p>
 <ul>
@@ -139,8 +182,6 @@ read-only with <code>immutable</code> by diskproxy, which is why sealing
 back to a rollback journal with no <code>-wal</code> beside it
 matters.</li>
 </ul>
-<p>A hub book for the FirstPair photo tools, in preparation, will show
-where these sit among them.</p>
 <h2 data-number="2.2" id="what-it-is-not"><span
 class="header-section-number">2.2</span> What it is not</h2>
 <p>tursolite is not an ORM, a migration tool or a server. It runs SQL
