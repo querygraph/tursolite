@@ -1,7 +1,7 @@
 # firstpair-tursolite
 
 One embedded SQL interface over SQLite and Turso, with the same shape in Rust, OCaml, OxCaml and
-Python. It is the database layer of packdir and DNG Compare, and meant for any program that wants
+Python. Its manual is on the [First Pair shelf](https://firstpair.org/books/tursolite/). It is the database layer of packdir and DNG Compare, and meant for any program that wants
 an embedded SQL file.
 
 | | SQLite | Turso | Turso MVCC, concurrent writers |
@@ -164,7 +164,7 @@ is opened.
 
 So `close` seals: it checkpoints, leaves MVCC, checkpoints again and, as `seal` says, either hands
 the file to SQLite to return to a rollback journal (`Standard`, the default) or leaves it as a WAL
-file (`Wal`). Empty `-wal` and `.db-log` files are removed, and one with content is an error, since it
+file (`KeepWal`, `Keep_wal`, `KEEP_WAL`). Empty `-wal` and `.db-log` files are removed, and one with content is an error, since it
 may hold commits. A crash leaves a file unsealed until Turso next opens it.
 
 `Journal::Existing` (`Existing`, `Journal.EXISTING`) leaves a SQLite file's journal alone. Foreign keys are off on every SQLite
