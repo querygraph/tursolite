@@ -29,7 +29,7 @@ tursolite is the database layer under three FirstPair projects. Each uses it for
 
 - **[packdir](https://firstpair.org/books/packdir/)** keeps directories of small files as SQLite archives (`.sqlar`). Under Turso's MVCC its workers write one container at once, and `close` seals each container so stock `sqlite3 -Ax` still extracts it.
 - **[DNG Compare](https://firstpair.org/books/dng-compare/)** keeps its preservation records (`recovery.sqlite3`), comparison caches and searchable metadata index in SQLite files. Its archives stay in WAL between runs, which is what `Keep_wal` and `Journal::Existing` are for, and it reads closed archives with `immutable`.
-- **Mechanic**, which builds Photo Mechanic catalogs from Lightroom previews, keeps its EXIF stub store in one SQLite file through it, from Rust and from OxCaml.
+- **Mechanic**, which builds Photo Mechanic catalogs from Lightroom previews, keeps its EXIF stub store in one SQLite file through it, from Rust and from OxCaml. It writes the store under Turso's MVCC, one connection per thread or domain, and the finished store is served read-only with `immutable` by diskproxy, which is why sealing back to a rollback journal with no `-wal` beside it matters.
 
 A hub book for the FirstPair photo tools, in preparation, will show where these sit among them.
 
@@ -251,7 +251,7 @@ The Python tests include a check across languages: a file Python's Turso path wr
 # Limits
 
 - **Turso is pinned at 0.8.3.** Its experimental features, and the rules above, are re-tested before the pin moves.
-- **`Without_rowid` tables cannot take inserts under MVCC** in Turso 0.8.3.
+- **`Without_rowid` tables cannot take inserts under MVCC** in Turso 0.8.3, even with the experimental flag. A program that wants both writes an ordinary rowid table under Turso, then rebuilds it `WITHOUT ROWID` with SQLite once the concurrent writing is done; Mechanic's stub store is made that way.
 - **The OCaml Turso C ABI and `pyturso` prepare every statement**, which costs time on statement-heavy work.
 - **An unsealed file**, left by a crash, stays in Turso's form until Turso opens it again. SQLite, and `immutable`, refuse it in MVCC mode.
 
