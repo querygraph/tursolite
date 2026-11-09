@@ -25,13 +25,26 @@ A program written against it chooses an engine with one option, and the library 
 
 ## Where it fits
 
+This book is one of nine on the FirstPair photo tools. Each owns one part, and
+[The FirstPair Photo Stack](https://firstpair.org/books/photostack/) shows how they fit together.
+
+- **[tiffgraph](https://firstpair.org/books/tiffgraph/)** walks a TIFF or DNG file's structure under a fixed grammar and finds its editable XMP packet.
+- **[phidentify](https://firstpair.org/books/phidentify/)** computes a photo's identities: SHA-256, DNG raw blocks, image data, Lightroom fingerprint, metadata record and preserved digest.
+- **[phindex](https://firstpair.org/books/phindex/)** keeps those identities for every file of a volume, and aligns two volumes by content.
+- **[DNG Compare](https://firstpair.org/books/dng-compare/)** compares pairs and preserves one side byte for byte as deltas against the other, with a searchable metadata section, through `dngc`.
+- **[Semantic Unison](https://firstpair.org/books/semantic-unison/)** synchronizes photo trees, sending metadata edits without resending image bytes, and preserves what a shuttle disk brings into the same archives.
+- **[packdir](https://firstpair.org/books/packdir/)** keeps directories of small files as SQLite archives that still work like plain files.
+- **[Tursolite](https://firstpair.org/books/tursolite/)** is the SQLite and Turso layer under packdir, DNG Compare and Mechanic.
+- **[diskproxy](https://firstpair.org/books/diskproxy/)** serves a folder as a virtual disk, such as previews with camera metadata spliced in, and captures ratings into sidecars.
+- **[Lightroom Repair](https://firstpair.org/books/lightroom-repair/)** repairs Lightroom Classic catalogs, previews and Sync without forging their state.
+
+### Who uses it
+
 tursolite is the database layer under three FirstPair projects. Each uses it for files that must outlive the program that wrote them:
 
 - **[packdir](https://firstpair.org/books/packdir/)** keeps directories of small files as SQLite archives (`.sqlar`). Under Turso's MVCC its workers write one container at once, and `close` seals each container so stock `sqlite3 -Ax` still extracts it.
 - **[DNG Compare](https://firstpair.org/books/dng-compare/)** keeps its preservation records (`recovery.sqlite3`), comparison caches and searchable metadata index in SQLite files. Its archives stay in WAL between runs, which is what `Keep_wal` and `Journal::Existing` are for, and it reads closed archives with `immutable`.
 - **Mechanic**, which builds Photo Mechanic catalogs from Lightroom previews, keeps its EXIF stub store in one SQLite file through it, from Rust and from OxCaml. It writes the store under Turso's MVCC, one connection per thread or domain, and the finished store is served read-only with `immutable` by diskproxy, which is why sealing back to a rollback journal with no `-wal` beside it matters.
-
-A hub book for the FirstPair photo tools, in preparation, will show where these sit among them.
 
 ## What it is not
 
